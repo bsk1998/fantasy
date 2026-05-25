@@ -1,21 +1,30 @@
 import { useState, useEffect, createContext, useContext } from 'react';
 import { supabase } from './supabaseClient';
-import { API_BASE } from './config';
+import { API_BASE, ADMIN_EMAILS } from './config';
 import Dashboard from './views/Dashboard';
 import MyTeam from './views/MyTeam';
 import Predictions from './views/Predictions';
 import Leaderboard from './views/Leaderboard';
+import Complaints from './views/Complaints';
+import AdminPanel from './views/AdminPanel';
 
 // ─── Context global ────────────────────────────────────────────────────────
 export const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 
+// ─── Helper : appel API avec préfixe /api en dev ───────────────────────────
+// En dev  → fetch("/api/leaderboard")  → proxy Vite → localhost:8000/leaderboard
+// En prod → fetch("https://monapi.com/leaderboard")
+export const apiFetch = (path, options = {}) =>
+  fetch(`${API_BASE}/api${path}`, options);
+
 // ─── Navigation ────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { id: 'dashboard',   icon: 'HOME',   label: 'Accueil'    },
-  { id: 'myteam',      icon: 'PITCH',  label: 'Équipe'     },
-  { id: 'predictions', icon: 'TARGET', label: 'Pronos'     },
-  { id: 'leaderboard', icon: 'TROPHY', label: 'Classement' },
+  { id: 'dashboard',   icon: 'HOME',      label: 'Accueil'    },
+  { id: 'myteam',      icon: 'PITCH',     label: 'Équipe'     },
+  { id: 'predictions', icon: 'TARGET',    label: 'Pronos'     },
+  { id: 'leaderboard', icon: 'TROPHY',    label: 'Classement' },
+  { id: 'complaints',  icon: 'FLAG',      label: 'Plaintes'   },
 ];
 
 // ─── Icônes SVG inline ─────────────────────────────────────────────────────
@@ -49,6 +58,17 @@ export const Icon = ({ name, size = 22 }) => {
         <path d="M7 4h10v7a5 5 0 01-10 0z"/>
         <path d="M5 4H3v4a4 4 0 004 4"/>
         <path d="M19 4h2v4a4 4 0 01-4 4"/>
+      </svg>
+    ),
+    FLAG: (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/>
+        <line x1="4" y1="22" x2="4" y2="15"/>
+      </svg>
+    ),
+    ADMIN: (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
       </svg>
     ),
     BOLT: (
@@ -92,6 +112,37 @@ export const Icon = ({ name, size = 22 }) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  GESTION DES HASH D'ERREUR SUPABASE DANS L'URL
+//  Exemple : #error=access_denied&error_code=otp_expired
+// ══════════════════════════════════════════════════════════════════════════════
+
+function parseHashError() {
+  if (typeof window === 'undefined') return null;
+  const hash = window.location.hash;
+  if (!hash || !hash.includes('error=')) return null;
+
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  return {
+    error:       params.get('error'),
+    errorCode:   params.get('error_code'),
+    errorDesc:   params.get('error_description')?.replace(/\+/g, ' '),
+  };
+}
+
+function clearHashFromURL() {
+  // Retire le hash de l'URL sans recharger la page
+  if (typeof window !== 'undefined' && window.history?.replaceState) {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+}
+
+const HASH_ERROR_MESSAGES = {
+  otp_expired:          '⏰ Le lien de confirmation a expiré. Reconnecte-toi et demande un nouveau lien.',
+  access_denied:        '🚫 Accès refusé. Le lien est invalide ou a déjà été utilisé.',
+  email_not_confirmed:  '📧 Confirme ton email avant de te connecter.',
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  SPLASH SCREEN
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -118,30 +169,28 @@ function SplashScreen() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  LOGIN / REGISTER SCREEN — Email + Mot de passe (100% Supabase Auth gratuit)
+//  LOGIN / REGISTER SCREEN
 // ══════════════════════════════════════════════════════════════════════════════
 
-function AuthScreen({ onSuccess }) {
-  const [mode,         setMode]         = useState('login');    // 'login' | 'register'
+function AuthScreen({ onSuccess, initialError }) {
+  const [mode,         setMode]         = useState('login');
   const [email,        setEmail]        = useState('');
   const [password,     setPassword]     = useState('');
   const [username,     setUsername]     = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading,      setLoading]      = useState(false);
-  const [error,        setError]        = useState(null);
+  const [error,        setError]        = useState(initialError || null);
   const [success,      setSuccess]      = useState(null);
 
-  // Validation côté client
+  // Afficher l'erreur de hash Supabase si présente
+  useEffect(() => {
+    if (initialError) setError(initialError);
+  }, [initialError]);
+
   const validateForm = () => {
-    if (!email.trim() || !email.includes('@')) {
-      return 'Adresse email invalide.';
-    }
-    if (password.length < 6) {
-      return 'Le mot de passe doit contenir au moins 6 caractères.';
-    }
-    if (mode === 'register' && username.trim().length < 2) {
-      return 'Le pseudo doit contenir au moins 2 caractères.';
-    }
+    if (!email.trim() || !email.includes('@')) return 'Adresse email invalide.';
+    if (password.length < 6) return 'Le mot de passe doit contenir au moins 6 caractères.';
+    if (mode === 'register' && username.trim().length < 2) return 'Le pseudo doit contenir au moins 2 caractères.';
     return null;
   };
 
@@ -151,23 +200,18 @@ function AuthScreen({ onSuccess }) {
     setSuccess(null);
 
     const validationError = validateForm();
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
+    if (validationError) { setError(validationError); return; }
 
     setLoading(true);
 
     try {
       if (mode === 'login') {
-        // ── Connexion ───────────────────────────────────────────────────────
         const { data, error: authError } = await supabase.auth.signInWithPassword({
           email:    email.trim().toLowerCase(),
           password: password,
         });
 
         if (authError) {
-          // Messages d'erreur traduits en français
           const errorMap = {
             'Invalid login credentials': 'Email ou mot de passe incorrect.',
             'Email not confirmed':       'Confirme ton email avant de te connecter.',
@@ -175,38 +219,28 @@ function AuthScreen({ onSuccess }) {
           };
           throw new Error(errorMap[authError.message] || authError.message);
         }
-
-        if (data?.session) {
-          onSuccess(data.session);
-        }
+        if (data?.session) onSuccess(data.session);
 
       } else {
-        // ── Inscription ─────────────────────────────────────────────────────
         const { data, error: authError } = await supabase.auth.signUp({
           email:    email.trim().toLowerCase(),
           password: password,
           options: {
-            data: {
-              username: username.trim(),
-              full_name: username.trim(),
-            },
+            data: { username: username.trim(), full_name: username.trim() },
           },
         });
 
         if (authError) {
           const errorMap = {
             'User already registered': 'Cet email est déjà utilisé. Connecte-toi.',
-            'Password should be at least 6 characters': 'Mot de passe trop court (6 caractères min).',
           };
           throw new Error(errorMap[authError.message] || authError.message);
         }
 
-        // Si email de confirmation requis (selon config Supabase)
         if (data?.user && !data?.session) {
           setSuccess('✅ Compte créé ! Vérifie ta boîte mail pour confirmer.');
           setMode('login');
         } else if (data?.session) {
-          // Auto-connexion sans confirmation email (désactivé dans Supabase Dashboard)
           onSuccess(data.session);
         }
       }
@@ -220,9 +254,7 @@ function AuthScreen({ onSuccess }) {
   return (
     <div className="login-screen">
       <div className="login-bg-grid" />
-
       <div className="login-content">
-        {/* ── HERO ─────────────────────────────────────────────── */}
         <div className="login-hero">
           <div className="login-trophy-wrap">
             <span className="login-trophy-emoji">🏆</span>
@@ -230,140 +262,72 @@ function AuthScreen({ onSuccess }) {
           </div>
           <h1 className="login-title">BOULZAZEN</h1>
           <p className="login-subtitle">FANTASY · PRONOS · WC 2026</p>
-          <div className="login-divider">
-            <span>LIGUE PRIVÉE</span>
-          </div>
+          <div className="login-divider"><span>LIGUE PRIVÉE</span></div>
         </div>
 
-        {/* ── CARD FORMULAIRE ────────────────────────────────── */}
         <div className="login-card">
-
-          {/* Toggle Login / Register */}
           <div className="auth-mode-toggle">
-            <button
-              className={`auth-mode-btn ${mode === 'login' ? 'active' : ''}`}
-              onClick={() => { setMode('login'); setError(null); setSuccess(null); }}
-              type="button"
-            >
+            <button className={`auth-mode-btn ${mode === 'login' ? 'active' : ''}`}
+              onClick={() => { setMode('login'); setError(null); setSuccess(null); }} type="button">
               Connexion
             </button>
-            <button
-              className={`auth-mode-btn ${mode === 'register' ? 'active' : ''}`}
-              onClick={() => { setMode('register'); setError(null); setSuccess(null); }}
-              type="button"
-            >
+            <button className={`auth-mode-btn ${mode === 'register' ? 'active' : ''}`}
+              onClick={() => { setMode('register'); setError(null); setSuccess(null); }} type="button">
               Inscription
             </button>
           </div>
 
-          {/* Messages */}
           {error   && <div className="auth-alert error">{error}</div>}
           {success && <div className="auth-alert success">{success}</div>}
 
-          {/* Formulaire */}
           <form onSubmit={handleSubmit} className="auth-form" noValidate>
-
-            {/* Pseudo — uniquement à l'inscription */}
             {mode === 'register' && (
               <div className="auth-field">
-                <label className="auth-label">
-                  <Icon name="USER" size={14} />
-                  Pseudo
-                </label>
-                <input
-                  type="text"
-                  className="auth-input"
-                  placeholder="Ton pseudo dans la ligue"
-                  value={username}
-                  onChange={e => setUsername(e.target.value)}
-                  maxLength={24}
-                  autoComplete="username"
-                  required
-                />
+                <label className="auth-label"><Icon name="USER" size={14} /> Pseudo</label>
+                <input type="text" className="auth-input" placeholder="Ton pseudo dans la ligue"
+                  value={username} onChange={e => setUsername(e.target.value)} maxLength={24} autoComplete="username" required />
               </div>
             )}
 
-            {/* Email */}
             <div className="auth-field">
-              <label className="auth-label">
-                <Icon name="MAIL" size={14} />
-                Email
-              </label>
-              <input
-                type="email"
-                className="auth-input"
-                placeholder="ton@email.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                autoComplete="email"
-                inputMode="email"
-                required
-              />
+              <label className="auth-label"><Icon name="MAIL" size={14} /> Email</label>
+              <input type="email" className="auth-input" placeholder="ton@email.com"
+                value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" inputMode="email" required />
             </div>
 
-            {/* Mot de passe */}
             <div className="auth-field">
-              <label className="auth-label">
-                <Icon name="LOCK" size={14} />
-                Mot de passe
-              </label>
+              <label className="auth-label"><Icon name="LOCK" size={14} /> Mot de passe</label>
               <div className="auth-input-wrap">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  className="auth-input"
+                <input type={showPassword ? 'text' : 'password'} className="auth-input"
                   placeholder={mode === 'register' ? 'Min. 6 caractères' : '••••••••'}
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  required
-                />
-                <button
-                  type="button"
-                  className="auth-eye-btn"
-                  onClick={() => setShowPassword(s => !s)}
-                  aria-label="Afficher/masquer le mot de passe"
-                >
+                  value={password} onChange={e => setPassword(e.target.value)}
+                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required />
+                <button type="button" className="auth-eye-btn" onClick={() => setShowPassword(s => !s)}>
                   <Icon name={showPassword ? 'EYE_OFF' : 'EYE'} size={16} />
                 </button>
               </div>
             </div>
 
-            {/* Bouton submit */}
-            <button
-              type="submit"
-              className={`auth-submit-btn ${loading ? 'loading' : ''}`}
-              disabled={loading}
-            >
+            <button type="submit" className={`auth-submit-btn ${loading ? 'loading' : ''}`} disabled={loading}>
               {loading
                 ? <span className="btn-spinner" />
-                : mode === 'login' ? '🚀 Se connecter' : '⚽ Créer mon compte'
-              }
+                : mode === 'login' ? '🚀 Se connecter' : '⚽ Créer mon compte'}
             </button>
           </form>
 
-          {/* Lien mot de passe oublié */}
           {mode === 'login' && (
-            <button
-              type="button"
-              className="auth-forgot-btn"
+            <button type="button" className="auth-forgot-btn"
               onClick={async () => {
-                if (!email.trim()) {
-                  setError('Entre ton email ci-dessus pour réinitialiser ton mot de passe.');
-                  return;
-                }
+                if (!email.trim()) { setError('Entre ton email ci-dessus.'); return; }
                 setLoading(true);
                 const { error: resetError } = await supabase.auth.resetPasswordForEmail(
                   email.trim().toLowerCase(),
                   { redirectTo: `${window.location.origin}/reset-password` }
                 );
                 setLoading(false);
-                if (resetError) {
-                  setError('Erreur lors de l\'envoi. Vérifie ton email.');
-                } else {
-                  setSuccess('📧 Email de réinitialisation envoyé !');
-                }
-              }}
-            >
+                if (resetError) setError('Erreur lors de l\'envoi.');
+                else setSuccess('📧 Email de réinitialisation envoyé !');
+              }}>
               Mot de passe oublié ?
             </button>
           )}
@@ -400,9 +364,7 @@ function SyncScreen() {
   return (
     <div className="sync-screen">
       <div className="sync-content">
-        <div className="sync-icon">
-          <Icon name="BOLT" size={40} />
-        </div>
+        <div className="sync-icon"><Icon name="BOLT" size={40} /></div>
         <h2 className="sync-title">Synchronisation</h2>
         <p className="sync-step">{steps[step]}</p>
         <div className="sync-progress">
@@ -418,17 +380,29 @@ function SyncScreen() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [session,      setSession]      = useState(null);
-  const [user,         setUser]         = useState(null);
-  const [screen,       setScreen]       = useState('splash');
-  const [activeTab,    setActiveTab]    = useState('dashboard');
-  const [syncData,     setSyncData]     = useState(null);
+  const [session,   setSession]   = useState(null);
+  const [user,      setUser]      = useState(null);
+  const [screen,    setScreen]    = useState('splash'); // 'splash' | 'login' | 'syncing' | 'app'
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [syncData,  setSyncData]  = useState(null);
+  const [hashError, setHashError] = useState(null); // Erreur détectée dans l'URL hash
+
+  // ── Vérification du hash d'erreur Supabase au chargement ─────────────────
+  useEffect(() => {
+    const err = parseHashError();
+    if (err) {
+      clearHashFromURL();
+      const msg = HASH_ERROR_MESSAGES[err.errorCode]
+               || err.errorDesc
+               || `Erreur d'authentification : ${err.error}`;
+      setHashError(msg);
+    }
+  }, []);
 
   // ── Auth listener ─────────────────────────────────────────────────────────
   useEffect(() => {
     let splashTimer;
 
-    // Vérifier la session existante au chargement
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       if (s) {
         setSession(s);
@@ -438,19 +412,23 @@ export default function App() {
       }
     });
 
-    // Écouter les changements d'état auth
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, s) => {
-        setSession(s);
         if (event === 'SIGNED_IN' && s) {
           clearTimeout(splashTimer);
+          setSession(s);
           await triggerSync(s);
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
           setSyncData(null);
+          setSession(null);
           setScreen('login');
         } else if (event === 'TOKEN_REFRESHED' && s) {
           setSession(s);
+        } else if (event === 'PASSWORD_RECOVERY') {
+          // Lien de reset password valide → aller à l'écran de login avec message
+          setHashError('🔑 Entre ton nouveau mot de passe ci-dessous.');
+          setScreen('login');
         }
       }
     );
@@ -470,7 +448,11 @@ export default function App() {
                     || s.user?.email?.split('@')[0]
                     || 'Joueur';
 
-      const res = await fetch(`${API_BASE}/auth/sync`, {
+      // ⚠️ Important : en dev on appelle /api/auth/sync (proxy Vite)
+      //               en prod on appelle https://api.com/auth/sync (VITE_API_BASE)
+      const endpoint = `${API_BASE}/api/auth/sync`;
+
+      const res = await fetch(endpoint, {
         method:  'POST',
         headers: {
           'Content-Type':  'application/json',
@@ -481,6 +463,8 @@ export default function App() {
           email:    s.user.email,
           username: username,
         }),
+        // Timeout de 10 secondes pour éviter un blocage infini
+        signal: AbortSignal.timeout(10000),
       });
 
       if (res.ok) {
@@ -488,20 +472,25 @@ export default function App() {
         setUser(data.user);
         setSyncData(data.sync_info);
       } else {
-        throw new Error(`sync_failed_${res.status}`);
+        const errorText = await res.text().catch(() => '');
+        console.warn(`Sync API répondu ${res.status}:`, errorText);
+        throw new Error(`sync_${res.status}`);
       }
     } catch (err) {
-      // Fallback gracieux — on ne bloque pas l'accès si le backend est down
-      console.warn('Sync backend indisponible, mode dégradé :', err.message);
+      // Fallback gracieux — accès à l'app même si le backend est down
+      console.warn('⚠️  Sync backend indisponible, mode dégradé :', err.message);
+      const s2 = session || (await supabase.auth.getSession()).data.session;
       setUser({
-        username: s.user?.user_metadata?.username
-                 || s.user?.email?.split('@')[0]
-                 || 'Joueur',
-        email:           s.user.email,
-        score_fantasy:   0,
-        score_pronos_scores: 0,
-        score_bracket:   0,
-        total:           0,
+        username:             s2?.user?.user_metadata?.username
+                           || s2?.user?.email?.split('@')[0]
+                           || 'Joueur',
+        email:                s2?.user?.email || '',
+        id:                   s2?.user?.id || null,
+        score_fantasy:        0,
+        score_pronos_scores:  0,
+        score_bracket:        0,
+        score_annexes:        0,
+        total:                0,
       });
     } finally {
       setScreen('app');
@@ -517,15 +506,35 @@ export default function App() {
     await supabase.auth.signOut();
     setUser(null);
     setSyncData(null);
+    setSession(null);
     setScreen('login');
   };
 
+  // ── Vérifier si l'utilisateur est admin ───────────────────────────────────
+  const isAdmin = session?.user?.email
+    ? ADMIN_EMAILS.includes(session.user.email)
+    : false;
+
   // ── Context ───────────────────────────────────────────────────────────────
-  const ctx = { user, setUser, session, syncData, handleLogout, API_BASE };
+  const ctx = {
+    user,
+    setUser,
+    session,
+    syncData,
+    handleLogout,
+    API_BASE,
+    apiFetch,
+    isAdmin,
+  };
+
+  // ── Navigation items (+ Admin si applicable) ──────────────────────────────
+  const navItems = isAdmin
+    ? [...NAV_ITEMS, { id: 'admin', icon: 'ADMIN', label: 'Admin' }]
+    : NAV_ITEMS;
 
   // ── Routing ───────────────────────────────────────────────────────────────
   if (screen === 'splash')  return <SplashScreen />;
-  if (screen === 'login')   return <AuthScreen onSuccess={handleAuthSuccess} />;
+  if (screen === 'login')   return <AuthScreen onSuccess={handleAuthSuccess} initialError={hashError} />;
   if (screen === 'syncing') return <SyncScreen />;
 
   return (
@@ -541,15 +550,9 @@ export default function App() {
               <div className="header-subtitle">WC 2026</div>
             </div>
           </div>
-          <button
-            className="header-user-pill"
-            onClick={handleLogout}
-            title="Se déconnecter"
-          >
+          <button className="header-user-pill" onClick={handleLogout} title="Se déconnecter">
             <span className="pill-name">{user?.username ?? '—'}</span>
-            <span className="pill-score">
-              {(user?.total ?? 0).toLocaleString()} pts
-            </span>
+            <span className="pill-score">{(user?.total ?? 0).toLocaleString()} pts</span>
           </button>
         </header>
 
@@ -559,11 +562,13 @@ export default function App() {
           {activeTab === 'myteam'      && <MyTeam />}
           {activeTab === 'predictions' && <Predictions />}
           {activeTab === 'leaderboard' && <Leaderboard />}
+          {activeTab === 'complaints'  && <Complaints />}
+          {activeTab === 'admin'       && isAdmin && <AdminPanel />}
         </main>
 
         {/* ── BOTTOM NAV ──────────────────────────────────────────────────── */}
         <nav className="bottom-nav">
-          {NAV_ITEMS.map(item => (
+          {navItems.map(item => (
             <button
               key={item.id}
               className={`nav-btn ${activeTab === item.id ? 'active' : ''}`}
