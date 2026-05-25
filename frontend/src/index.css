@@ -1,0 +1,271 @@
+/* ─── BASE & CONFIGURATION SOMBRE ─── */
+:root {
+  --bg: #0b0f19;
+  --surface: #151f32;
+  --surface-light: #222f47;
+  --border: #2d3d5a;
+  --text: #f8fafc;
+  --muted: #64748b;
+  --green: #10b981;
+  --green-glow: #34d399;
+  --danger: #ef4444;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* En-tête Profil Utilisateur */
+.user-profile-header {
+  background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.profile-meta { display: flex; justify-content: space-between; align-items: center; }
+.user-title { font-size: 1.1rem; font-weight: 800; color: #fff; margin: 0; }
+.team-title { font-size: 0.8rem; color: var(--green-glow); margin: 2px 0 0 0; font-weight: 600; }
+
+/* Barre d'Étapes (Workflow) */
+.workflow-stepper {
+  display: flex;
+  background: var(--surface);
+  margin: 8px 16px;
+  border-radius: 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+}
+.step-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 6px;
+  font-weight: bold;
+  border-radius: 6px;
+}
+.step-btn.active {
+  background: var(--surface-light);
+  color: #fff;
+  border: 1px solid var(--border);
+}
+.step-btn.completed { color: var(--green-glow); }
+
+/* CONTENEUR DU TERRAIN MOBILE */
+.mobile-pitch-container {
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+
+/* TERRAIN DE FOOTBALL RÉALISTE */
+.football-pitch {
+  background: #166534;
+  background-image: linear-gradient(#15803d 50%, #166534 50%);
+  background-size: 100% 48px;
+  border: 3px solid #ffffff;
+  border-radius: 16px;
+  position: relative;
+  width: 100%;
+  height: 460px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  padding-top: 25px; /* Espace pour la cage de but */
+  box-sizing: border-box;
+  box-shadow: inset 0 0 30px rgba(0,0,0,0.5);
+}
+
+/* Dessin de la Cage de But */
+.pitch-goal-net {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  border-top: none;
+  background: rgba(255, 255, 255, 0.15);
+  border-bottom-left-radius: 4px;
+  border-bottom-right-radius: 4px;
+}
+
+/* Lignes Officielles */
+.pitch-center-circle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 90px;
+  height: 90px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.pitch-center-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.4);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+/* Rangées Tactiques */
+.pitch-row-line {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  width: 100%;
+  z-index: 5;
+}
+
+/* ROND DE POSITION / MAILLOT */
+.player-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 70px;
+  position: relative;
+}
+.jersey-circle {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 3px solid #38bdf8;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.8rem;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+.player-node.substitute .jersey-circle {
+  border-color: #facc15; /* Couleur différente pour le banc */
+}
+.player-node.vacant .jersey-circle {
+  background: rgba(15,23,42,0.6);
+  border: 2px dashed rgba(255,255,255,0.4);
+  color: rgba(255,255,255,0.6);
+  font-weight: normal;
+}
+
+.player-label-plate {
+  margin-top: 4px;
+  font-size: 0.65rem;
+  background: rgba(15, 23, 42, 0.9);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  max-width: 68px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+/* Badges Capitaines */
+.role-indicator-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 0.6rem;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+}
+.role-indicator-badge.cap { background: #eab308; }
+.role-indicator-badge.vice { background: #94a3b8; }
+
+/* Emplacement du Coach Intégré */
+.coach-bench-area {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface);
+  margin: 10px 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.coach-info { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+
+/* ─── MODAL TRANSFERTS COULISSANT (TIROIR MOBILE) ─── */
+.bottom-sheet-modal {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  top: 15%;
+  background: #0f172a;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  border-top: 2px solid var(--border);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  box-shadow: 0 -10px 25px rgba(0,0,0,0.5);
+}
+.modal-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.modal-close-btn { background: var(--surface-light); border: none; color: #fff; border-radius: 50%; width: 28px; height: 28px; font-weight: bold; }
+
+.modal-search {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  color: #fff;
+  font-size: 0.9rem;
+  margin-bottom: 10px;
+}
+
+.modal-scroll-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.picker-item-card {
+  background: var(--surface);
+  padding: 10px;
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid transparent;
+}
+.picker-item-card.selected { border-color: var(--green); background: #0c2d1e; }
+
+/* Bouton Validation Étape */
+.action-sticky-bar {
+  padding: 12px;
+  background: var(--bg);
+}
+.primary-action-btn {
+  width: 100%;
+  background: var(--green);
+  color: #fff;
+  border: none;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: bold;
+}
+.primary-action-btn:disabled { opacity: 0.4; }
