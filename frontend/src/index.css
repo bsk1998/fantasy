@@ -1742,3 +1742,217 @@ h3 {
 .rule-icon { flex-shrink: 0; font-size: 0.85rem; margin-top: 1px; }
 .rule-text { color: var(--text-2); }
 .rule-text strong { color: var(--text); }
+/* ═══════════════════════════════════════════════════════════════════
+   AUTH EMAIL / PASSWORD — Styles à AJOUTER à la fin de index.css
+   Remplace complètement le bloc login existant
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ─── TOGGLE LOGIN / REGISTER ───────────────────────────────────── */
+.auth-mode-toggle {
+  display: flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 50px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.auth-mode-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  border-radius: 50px;
+  transition: all 0.2s ease;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.auth-mode-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* ─── ALERTES ────────────────────────────────────────────────────── */
+.auth-alert {
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.auth-alert.error {
+  background: rgba(244, 63, 94, 0.1);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  color: var(--danger);
+}
+
+.auth-alert.success {
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid rgba(0, 230, 118, 0.3);
+  color: var(--green);
+}
+
+/* ─── FORMULAIRE AUTH ────────────────────────────────────────────── */
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+  text-transform: uppercase;
+  cursor: default;
+}
+
+.auth-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.auth-input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+/* Quand dans un wrapper (avec bouton œil) */
+.auth-input-wrap .auth-input {
+  padding-right: 44px;
+}
+
+.auth-input::placeholder { color: var(--text-3); }
+
+.auth-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+}
+
+.auth-input:user-invalid:not(:placeholder-shown) {
+  border-color: var(--danger);
+}
+
+/* Bouton œil (afficher/masquer password) */
+.auth-eye-btn {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.auth-eye-btn:hover { color: var(--text-2); }
+
+/* ─── BOUTON SUBMIT ──────────────────────────────────────────────── */
+.auth-submit-btn {
+  width: 100%;
+  background: linear-gradient(135deg, var(--green), var(--green-dim));
+  color: #000;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 14px 20px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  box-shadow: 0 4px 15px rgba(0, 230, 118, 0.25);
+  min-height: 48px;
+}
+
+.auth-submit-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #00f07a, var(--green));
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 230, 118, 0.35);
+}
+
+.auth-submit-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.auth-submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.auth-submit-btn.loading {
+  pointer-events: none;
+}
+
+/* ─── MOT DE PASSE OUBLIÉ ────────────────────────────────────────── */
+.auth-forgot-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: center;
+  width: 100%;
+  transition: color 0.15s;
+  letter-spacing: 0.02em;
+  margin-top: -4px;
+}
+
+.auth-forgot-btn:hover { color: var(--text); }
+
+/* ─── AUTOFILL CHROMIUM — Override couleur fond ──────────────────── */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:hover,
+.auth-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface-2) inset;
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  border-color: var(--border);
+}
+
+/* ─── RESPONSIVE AUTOFILL ────────────────────────────────────────── */
+@media (max-height: 700px) {
+  .login-hero { padding-top: 0; }
+  .login-trophy-emoji { font-size: 2.5rem; }
+  .login-title { font-size: 2.2rem; }
+  .auth-form { gap: 10px; }
+}
