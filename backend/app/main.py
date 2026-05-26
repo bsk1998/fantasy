@@ -9,6 +9,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +61,7 @@ if DB_AVAILABLE and MODELS_AVAILABLE:
 app = FastAPI(
     title="Fantasy Boulzazen — API WC 2026",
     description="Backend complet pour la ligue privée Fantasy Coupe du Monde",
-    version="4.0.0",
+    version="4.1.0",
 )
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
@@ -113,25 +114,103 @@ class ComplaintPayload(BaseModel):
     stat_claimed: Optional[dict] = None
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _make_unique_username(base: str, db) -> str:
+    """
+    Génère un username unique en ajoutant un suffixe numérique si nécessaire.
+    Ex: "john" → "john" → "john_2" → "john_3" ...
+    """
+    username = base[:24]  # max 24 chars
+    # Nettoyage : supprime les caractères spéciaux
+    import re
+    username = re.sub(r'[^a-zA-Z0-9_\-]', '_', username)
+    if not username:
+        username = "joueur"
+
+    candidate = username
+    counter = 2
+    while True:
+        try:
+            existing = db.query(User).filter(User.username == candidate).first()
+            if not existing:
+                return candidate
+            candidate = f"{username}_{counter}"
+            counter += 1
+            if counter > 999:
+                # Fallback ultime avec timestamp
+                import random
+                return f"{username}_{random.randint(1000, 9999)}"
+        except Exception:
+            return f"{username}_{counter}"
+
+
+def _build_fallback_user(body: SyncRequest) -> dict:
+    """Retourne un user minimal en mode dégradé."""
+    username = body.username or body.email.split("@")[0]
+    return {
+        "status": "degraded",
+        "user": {
+            "id": None,
+            "username": username,
+            "email": body.email,
+            "score_fantasy": 0,
+            "score_pronos_scores": 0,
+            "score_bracket": 0,
+            "total": 0,
+        },
+        "sync_info": {
+            "matchs_scraped": 0,
+            "joueurs_recalculés": 0,
+            "pronos_calculés": 0,
+            "timestamp": datetime.utcnow().isoformat(),
+            "mode": "degraded",
+        },
+    }
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 async def verify_supabase_token(authorization: str = Header(default=None)) -> dict:
+    """
+    Vérifie le JWT Supabase si la clé secrète est configurée.
+    En mode dev (sans clé), laisse passer sans vérification.
+    """
     if not SUPABASE_JWT_SECRET:
+        # Mode dev : pas de vérification JWT
         return {"sub": "dev-user", "email": "dev@boulzazen.local"}
+
     if not JWT_AVAILABLE:
+        logger.warning("python-jose non installé, JWT non vérifié")
         return {"sub": "dev-user", "email": "dev@boulzazen.local"}
+
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Token d'authentification manquant ou invalide.")
-    token = authorization.split(" ")[1]
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token d'authentification manquant ou invalide.",
+        )
+
+    token = authorization.split(" ", 1)[1]
     try:
-        payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"],
-                             options={"verify_aud": False})
+        payload = jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False},
+        )
         return payload
-    except Exception as e:
+    except JWTError as e:
         logger.error(f"JWT invalide : {e}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Token expiré ou invalide.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expiré ou invalide.",
+        )
+    except Exception as e:
+        logger.error(f"Erreur JWT inattendue : {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Erreur de vérification du token.",
+        )
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -148,9 +227,11 @@ async def health_check():
         except Exception as e:
             db_status = f"error: {str(e)[:50]}"
     return {
-        "status": "ok", "version": "4.0.0",
+        "status": "ok",
+        "version": "4.1.0",
         "db_status": db_status,
         "scraper_available": SCRAPER_AVAILABLE,
+        "jwt_configured": bool(SUPABASE_JWT_SECRET),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -158,111 +239,176 @@ async def health_check():
 # ── Auth Sync ─────────────────────────────────────────────────────────────────
 
 @app.post("/auth/sync")
-async def sync_on_login(body: SyncRequest,
-                        _token: dict = Depends(verify_supabase_token)):
-    logger.info(f"🔄 Sync demandé : {body.email}")
-    fallback_response = {
-        "status": "degraded",
-        "user": {
-            "id": 1,
-            "username": body.username or body.email.split("@")[0],
-            "email": body.email,
-            "score_fantasy": 0, "score_pronos_scores": 0,
-            "score_bracket": 0, "total": 0,
-        },
-        "sync_info": {
-            "matchs_scraped": 0, "joueurs_recalculés": 0,
-            "pronos_calculés": 0,
-            "timestamp": datetime.utcnow().isoformat(), "mode": "degraded",
-        },
-    }
+async def sync_on_login(
+    body: SyncRequest,
+    _token: dict = Depends(verify_supabase_token),
+):
+    """
+    Synchronise l'utilisateur Supabase avec la BDD locale.
+    Crée le compte si nécessaire, recalcule les points, retourne le profil.
+    """
+    logger.info(f"🔄 Sync demandé pour : {body.email}")
 
+    # ── Mode dégradé si BDD non disponible ───────────────────────────────────
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return fallback_response
+        logger.warning("BDD non disponible, retour mode dégradé")
+        return _build_fallback_user(body)
 
     db = None
     try:
         db = SessionLocal()
-        username = body.username or body.email.split("@")[0]
-        user = None
 
+        # ── 1. Chercher l'utilisateur par email ───────────────────────────────
+        user = None
         try:
             user = db.query(User).filter(User.email == body.email).first()
         except Exception as e:
-            logger.error(f"Erreur query User : {e}")
-            return fallback_response
+            logger.error(f"Erreur query User par email : {e}")
+            return _build_fallback_user(body)
 
+        # ── 2. Créer l'utilisateur s'il n'existe pas ──────────────────────────
         if not user:
+            base_username = (body.username or body.email.split("@")[0])
+            unique_username = _make_unique_username(base_username, db)
+
             try:
-                user = User(username=username, email=body.email, hashed_password="")
+                user = User(
+                    username=unique_username,
+                    email=body.email,
+                    hashed_password="",
+                    score_fantasy=0,
+                    score_predictor_scores=0,
+                    score_predictor_tableaux=0,
+                    score_top_individuel=0,
+                )
                 db.add(user)
                 db.commit()
                 db.refresh(user)
-                logger.info(f"✨ Nouvel utilisateur : {user.username}")
-            except Exception as e:
-                logger.error(f"Erreur création User : {e}")
+                logger.info(f"✨ Nouvel utilisateur créé : {user.username} ({user.email})")
+
+            except IntegrityError as e:
                 db.rollback()
+                logger.warning(f"IntegrityError à la création, tentative de récupération : {e}")
+                # Peut arriver en cas de race condition, on re-cherche
                 try:
                     user = db.query(User).filter(User.email == body.email).first()
-                except Exception:
-                    pass
-                if not user:
-                    return fallback_response
-        else:
-            logger.info(f"👤 Utilisateur existant : {user.username}")
+                    if not user:
+                        # Essai avec username encore plus unique
+                        import time
+                        fallback_username = f"{base_username}_{int(time.time()) % 10000}"
+                        user = User(
+                            username=fallback_username,
+                            email=body.email,
+                            hashed_password="",
+                        )
+                        db.add(user)
+                        db.commit()
+                        db.refresh(user)
+                        logger.info(f"✨ Utilisateur créé (fallback) : {user.username}")
+                except Exception as e2:
+                    logger.error(f"Échec création utilisateur (fallback) : {e2}")
+                    db.rollback()
+                    return _build_fallback_user(body)
 
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Erreur création User : {e}")
+                return _build_fallback_user(body)
+
+        else:
+            logger.info(f"👤 Utilisateur existant : {user.username} ({user.email})")
+
+        # ── 3. Mettre à jour le username si fourni et différent ───────────────
+        if body.username and body.username.strip() and body.username.strip() != user.username:
+            try:
+                new_uname = _make_unique_username(body.username.strip(), db)
+                # Vérifier que le nouveau username n'est pas déjà pris par un autre
+                existing = db.query(User).filter(
+                    User.username == new_uname,
+                    User.id != user.id
+                ).first()
+                if not existing:
+                    user.username = new_uname
+            except Exception as e:
+                logger.warning(f"Impossible de mettre à jour le username : {e}")
+
+        # ── 4. Recalcul des points Fantasy ────────────────────────────────────
         fantasy_pts = 0
         try:
-            roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
+            roster = db.query(FantasyRoster).filter(
+                FantasyRoster.user_id == user.id
+            ).first()
             if roster:
-                fantasy_pts = sum(p.points_total for p in roster.players)
+                fantasy_pts = sum(
+                    (p.points_total or 0) for p in roster.players
+                )
                 if roster.coach:
-                    fantasy_pts += roster.coach.points_total
+                    fantasy_pts += (roster.coach.points_total or 0)
                 user.score_fantasy = fantasy_pts
         except Exception as e:
-            logger.warning(f"Roster calcul échoué : {e}")
+            logger.warning(f"Roster calcul échoué pour user {user.id} : {e}")
 
+        # ── 5. Recalcul des points Pronos ─────────────────────────────────────
         prono_pts = 0
         try:
-            pronos = db.query(PredictionScore).filter(PredictionScore.user_id == user.id).all()
-            prono_pts = sum(p.points_earned for p in pronos)
+            pronos = db.query(PredictionScore).filter(
+                PredictionScore.user_id == user.id
+            ).all()
+            prono_pts = sum((p.points_earned or 0) for p in pronos)
             user.score_predictor_scores = prono_pts
         except Exception as e:
-            logger.warning(f"Pronos calcul échoué : {e}")
+            logger.warning(f"Pronos calcul échoué pour user {user.id} : {e}")
 
+        # ── 6. Commit final ───────────────────────────────────────────────────
         try:
             db.commit()
-        except Exception as e:
-            logger.error(f"Commit échoué : {e}")
+        except IntegrityError as e:
             db.rollback()
+            logger.warning(f"IntegrityError au commit final : {e}")
+            # On continue quand même, les données sont déjà lues
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Erreur commit final : {e}")
 
-        total = ((user.score_fantasy or 0) + (user.score_predictor_scores or 0)
-                 + (user.score_predictor_tableaux or 0))
+        # ── 7. Construction de la réponse ─────────────────────────────────────
+        total = (
+            (user.score_fantasy or 0)
+            + (user.score_predictor_scores or 0)
+            + (user.score_predictor_tableaux or 0)
+            + (user.score_top_individuel or 0)
+        )
 
         return {
             "status": "synced",
             "user": {
-                "id": user.id, "username": user.username, "email": user.email,
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
                 "score_fantasy": user.score_fantasy or 0,
                 "score_pronos_scores": user.score_predictor_scores or 0,
                 "score_bracket": user.score_predictor_tableaux or 0,
                 "total": total,
             },
             "sync_info": {
-                "matchs_scraped": 0, "joueurs_recalculés": 0, "pronos_calculés": 0,
-                "timestamp": datetime.utcnow().isoformat(), "mode": "normal",
+                "matchs_scraped": 0,
+                "joueurs_recalculés": 0,
+                "pronos_calculés": len(pronos) if 'pronos' in dir() else 0,
+                "timestamp": datetime.utcnow().isoformat(),
+                "mode": "normal",
             },
         }
 
     except Exception as e:
-        logger.error(f"❌ Erreur sync inattendue : {e}")
+        logger.error(f"❌ Erreur sync inattendue pour {body.email} : {e}")
         logger.error(traceback.format_exc())
         if db:
             try:
                 db.rollback()
             except Exception:
                 pass
-        return fallback_response
+        # On retourne toujours une réponse valide — jamais de 500
+        return _build_fallback_user(body)
+
     finally:
         if db:
             try:
@@ -274,9 +420,11 @@ async def sync_on_login(body: SyncRequest,
 # ── Players & Coaches ─────────────────────────────────────────────────────────
 
 @app.get("/players")
-async def get_players(position: Optional[str] = None,
-                      nationality: Optional[str] = None,
-                      max_price: Optional[float] = None):
+async def get_players(
+    position: Optional[str] = None,
+    nationality: Optional[str] = None,
+    max_price: Optional[float] = None,
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         if SCRAPER_AVAILABLE:
             return get_all_players_market()
@@ -296,11 +444,20 @@ async def get_players(position: Optional[str] = None,
             if SCRAPER_AVAILABLE:
                 return get_all_players_market()
             return []
-        return [{"id": p.id, "name": p.name, "position": p.position,
-                 "nationality": p.nationality, "price": p.price,
-                 "goals": p.goals, "assists": p.assists,
-                 "points_total": p.points_total, "is_confirmed": p.is_confirmed}
-                for p in players]
+        return [
+            {
+                "id": p.id,
+                "name": p.name,
+                "position": p.position,
+                "nationality": p.nationality,
+                "price": p.price,
+                "goals": p.goals,
+                "assists": p.assists,
+                "points_total": p.points_total,
+                "is_confirmed": p.is_confirmed,
+            }
+            for p in players
+        ]
     except Exception as e:
         logger.error(f"Erreur /players : {e}")
         if SCRAPER_AVAILABLE:
@@ -321,10 +478,19 @@ async def get_coaches():
         db.close()
         if not coaches:
             return COACHES_CDM_2026_DATA
-        return [{"id": c.id, "name": c.name, "nationality": c.nationality,
-                 "price": c.price, "wins": c.wins, "losses": c.losses,
-                 "points_total": c.points_total, "status": c.status}
-                for c in coaches]
+        return [
+            {
+                "id": c.id,
+                "name": c.name,
+                "nationality": c.nationality,
+                "price": c.price,
+                "wins": c.wins,
+                "losses": c.losses,
+                "points_total": c.points_total,
+                "status": c.status,
+            }
+            for c in coaches
+        ]
     except Exception as e:
         logger.error(f"Erreur /coaches : {e}")
         return COACHES_CDM_2026_DATA
@@ -341,16 +507,22 @@ async def get_leaderboard():
         users = db.query(User).all()
         leaderboard = []
         for u in users:
-            total = ((u.score_fantasy or 0) + (u.score_predictor_scores or 0)
-                     + (u.score_predictor_tableaux or 0) + (u.score_top_individuel or 0))
-            leaderboard.append({
-                "username": u.username,
-                "fantasy": u.score_fantasy or 0,
-                "scores": u.score_predictor_scores or 0,
-                "bracket": u.score_predictor_tableaux or 0,
-                "annexes": u.score_top_individuel or 0,
-                "total": total,
-            })
+            total = (
+                (u.score_fantasy or 0)
+                + (u.score_predictor_scores or 0)
+                + (u.score_predictor_tableaux or 0)
+                + (u.score_top_individuel or 0)
+            )
+            leaderboard.append(
+                {
+                    "username": u.username,
+                    "fantasy": u.score_fantasy or 0,
+                    "scores": u.score_predictor_scores or 0,
+                    "bracket": u.score_predictor_tableaux or 0,
+                    "annexes": u.score_top_individuel or 0,
+                    "total": total,
+                }
+            )
         db.close()
         leaderboard.sort(key=lambda x: x["total"], reverse=True)
         for i, entry in enumerate(leaderboard):
@@ -371,33 +543,50 @@ async def get_matches():
 # ── Predictions Scores ────────────────────────────────────────────────────────
 
 @app.post("/predictions/score")
-async def save_score_prediction(payload: PredictionScorePayload,
-                                 _token: dict = Depends(verify_supabase_token)):
+async def save_score_prediction(
+    payload: PredictionScorePayload,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return {"status": "saved", "match_id": payload.match_id}
     try:
         db = SessionLocal()
-        user = db.query(User).filter(User.id == int(payload.user_id)).first()
+
+        # Accepte user_id numérique ou UUID (Supabase)
+        user = None
+        try:
+            uid_int = int(payload.user_id)
+            user = db.query(User).filter(User.id == uid_int).first()
+        except (ValueError, TypeError):
+            user = db.query(User).filter(User.email == payload.user_id).first()
+
         if not user:
             db.close()
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
 
-        match_data = next((m for m in MATCHS_CDM_2026 if m["id"] == payload.match_id), None)
+        match_data = next(
+            (m for m in MATCHS_CDM_2026 if m["id"] == payload.match_id), None
+        )
         if match_data and match_data.get("is_locked", False):
             db.close()
             raise HTTPException(status_code=400, detail="Match verrouillé.")
 
-        prono = (db.query(PredictionScore)
-                 .filter(PredictionScore.user_id == user.id,
-                         PredictionScore.match_id == payload.match_id)
-                 .first())
+        prono = (
+            db.query(PredictionScore)
+            .filter(
+                PredictionScore.user_id == user.id,
+                PredictionScore.match_id == payload.match_id,
+            )
+            .first()
+        )
 
         if prono:
             prono.predicted_home_score = payload.predicted_home
             prono.predicted_away_score = payload.predicted_away
         else:
             prono = PredictionScore(
-                user_id=user.id, match_id=payload.match_id,
+                user_id=user.id,
+                match_id=payload.match_id,
                 predicted_home_score=payload.predicted_home,
                 predicted_away_score=payload.predicted_away,
                 points_earned=0,
@@ -407,6 +596,7 @@ async def save_score_prediction(payload: PredictionScorePayload,
         db.commit()
         db.close()
         return {"status": "saved", "match_id": payload.match_id}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -415,18 +605,28 @@ async def save_score_prediction(payload: PredictionScorePayload,
 
 
 @app.get("/predictions/score/{user_id}")
-async def get_score_predictions(user_id: int,
-                                 _token: dict = Depends(verify_supabase_token)):
+async def get_score_predictions(
+    user_id: int,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return []
     try:
         db = SessionLocal()
-        pronos = db.query(PredictionScore).filter(PredictionScore.user_id == user_id).all()
-        result = [{"match_id": p.match_id,
-                   "predicted_home": p.predicted_home_score,
-                   "predicted_away": p.predicted_away_score,
-                   "points_earned": p.points_earned}
-                  for p in pronos]
+        pronos = (
+            db.query(PredictionScore)
+            .filter(PredictionScore.user_id == user_id)
+            .all()
+        )
+        result = [
+            {
+                "match_id": p.match_id,
+                "predicted_home": p.predicted_home_score,
+                "predicted_away": p.predicted_away_score,
+                "points_earned": p.points_earned,
+            }
+            for p in pronos
+        ]
         db.close()
         return result
     except Exception as e:
@@ -435,25 +635,43 @@ async def get_score_predictions(user_id: int,
 
 
 @app.post("/predictions/bracket")
-async def save_bracket(payload: BracketPayload,
-                       _token: dict = Depends(verify_supabase_token)):
+async def save_bracket(
+    payload: BracketPayload,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return {"status": "saved"}
     try:
         db = SessionLocal()
-        user = db.query(User).filter(User.id == int(payload.user_id)).first()
+        user = None
+        try:
+            uid_int = int(payload.user_id)
+            user = db.query(User).filter(User.id == uid_int).first()
+        except (ValueError, TypeError):
+            user = db.query(User).filter(User.email == payload.user_id).first()
+
         if not user:
             db.close()
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        tableau = db.query(PredictionTableau).filter(PredictionTableau.user_id == user.id).first()
+
+        tableau = (
+            db.query(PredictionTableau)
+            .filter(PredictionTableau.user_id == user.id)
+            .first()
+        )
         if tableau:
             tableau.bracket_data = payload.bracket_data
         else:
-            tableau = PredictionTableau(user_id=user.id, bracket_data=payload.bracket_data, points_earned=0)
+            tableau = PredictionTableau(
+                user_id=user.id,
+                bracket_data=payload.bracket_data,
+                points_earned=0,
+            )
             db.add(tableau)
         db.commit()
         db.close()
         return {"status": "saved"}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -462,29 +680,42 @@ async def save_bracket(payload: BracketPayload,
 
 
 @app.post("/predictions/annexes")
-async def save_annexes(payload: AnnexesPayload,
-                       _token: dict = Depends(verify_supabase_token)):
+async def save_annexes(
+    payload: AnnexesPayload,
+    _token: dict = Depends(verify_supabase_token),
+):
     return {"status": "saved", "message": "Pronostics annexes enregistrés"}
 
 
 # ── Fantasy Roster ────────────────────────────────────────────────────────────
 
 @app.post("/fantasy/roster")
-async def save_roster(payload: RosterPayload,
-                      _token: dict = Depends(verify_supabase_token)):
+async def save_roster(
+    payload: RosterPayload,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "saved", "player_count": len(payload.player_ids),
-                "remaining_budget": 100.0, "formation": payload.formation}
+        return {
+            "status": "saved",
+            "player_count": len(payload.player_ids),
+            "remaining_budget": 100.0,
+            "formation": payload.formation,
+        }
     try:
         db = SessionLocal()
+
         if len(payload.player_ids) > 15:
             db.close()
             raise HTTPException(status_code=400, detail="Maximum 15 joueurs autorisés.")
 
-        players = db.query(Player).filter(Player.id.in_(payload.player_ids)).all()
+        players = (
+            db.query(Player).filter(Player.id.in_(payload.player_ids)).all()
+        )
         if len(players) != len(payload.player_ids):
             db.close()
-            raise HTTPException(status_code=400, detail="Un ou plusieurs joueurs introuvables.")
+            raise HTTPException(
+                status_code=400, detail="Un ou plusieurs joueurs introuvables."
+            )
 
         total_prix = sum(p.price for p in players)
         coach = None
@@ -495,31 +726,51 @@ async def save_roster(payload: RosterPayload,
 
         if total_prix > 100.0:
             db.close()
-            raise HTTPException(status_code=400, detail=f"Budget dépassé : {total_prix:.1f}M€.")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Budget dépassé : {total_prix:.1f}M€.",
+            )
 
-        user = db.query(User).filter(User.id == int(payload.user_id)).first()
+        user = None
+        try:
+            uid_int = int(payload.user_id)
+            user = db.query(User).filter(User.id == uid_int).first()
+        except (ValueError, TypeError):
+            user = db.query(User).filter(User.email == payload.user_id).first()
+
         if not user:
             db.close()
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
 
-        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
+        roster = (
+            db.query(FantasyRoster)
+            .filter(FantasyRoster.user_id == user.id)
+            .first()
+        )
         if roster:
             roster.players = players
             roster.coach_id = payload.coach_id
             roster.current_formation = payload.formation
             roster.remaining_budget = round(100.0 - total_prix, 2)
         else:
-            roster = FantasyRoster(user_id=user.id, coach_id=payload.coach_id,
-                                   current_formation=payload.formation,
-                                   remaining_budget=round(100.0 - total_prix, 2))
+            roster = FantasyRoster(
+                user_id=user.id,
+                coach_id=payload.coach_id,
+                current_formation=payload.formation,
+                remaining_budget=round(100.0 - total_prix, 2),
+            )
             roster.players = players
             db.add(roster)
 
         db.commit()
         db.close()
-        return {"status": "saved", "player_count": len(players),
-                "remaining_budget": round(100.0 - total_prix, 2),
-                "formation": payload.formation}
+        return {
+            "status": "saved",
+            "player_count": len(players),
+            "remaining_budget": round(100.0 - total_prix, 2),
+            "formation": payload.formation,
+        }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -528,40 +779,78 @@ async def save_roster(payload: RosterPayload,
 
 
 @app.get("/fantasy/roster/{user_id}")
-async def get_roster(user_id: int, _token: dict = Depends(verify_supabase_token)):
+async def get_roster(
+    user_id: int,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
+        return {
+            "players": [],
+            "coach": None,
+            "formation": "4-3-3",
+            "remaining_budget": 100.0,
+        }
     try:
         db = SessionLocal()
-        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user_id).first()
+        roster = (
+            db.query(FantasyRoster)
+            .filter(FantasyRoster.user_id == user_id)
+            .first()
+        )
         if not roster:
             db.close()
-            return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
-        players_data = [{"id": p.id, "name": p.name, "position": p.position,
-                         "nationality": p.nationality, "price": p.price,
-                         "goals": p.goals, "assists": p.assists,
-                         "points_total": p.points_total}
-                        for p in roster.players]
+            return {
+                "players": [],
+                "coach": None,
+                "formation": "4-3-3",
+                "remaining_budget": 100.0,
+            }
+        players_data = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "position": p.position,
+                "nationality": p.nationality,
+                "price": p.price,
+                "goals": p.goals,
+                "assists": p.assists,
+                "points_total": p.points_total,
+            }
+            for p in roster.players
+        ]
         coach_data = None
         if roster.coach:
-            coach_data = {"id": roster.coach.id, "name": roster.coach.name,
-                          "nationality": roster.coach.nationality,
-                          "price": roster.coach.price,
-                          "points_total": roster.coach.points_total}
-        result = {"players": players_data, "coach": coach_data,
-                  "formation": roster.current_formation,
-                  "remaining_budget": roster.remaining_budget}
+            coach_data = {
+                "id": roster.coach.id,
+                "name": roster.coach.name,
+                "nationality": roster.coach.nationality,
+                "price": roster.coach.price,
+                "points_total": roster.coach.points_total,
+            }
+        result = {
+            "players": players_data,
+            "coach": coach_data,
+            "formation": roster.current_formation,
+            "remaining_budget": roster.remaining_budget,
+        }
         db.close()
         return result
     except Exception as e:
         logger.error(f"Erreur /fantasy/roster/{user_id} : {e}")
-        return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
+        return {
+            "players": [],
+            "coach": None,
+            "formation": "4-3-3",
+            "remaining_budget": 100.0,
+        }
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 
 @app.post("/admin/recalculate")
-async def manual_recalculate(_token: dict = Depends(verify_supabase_token)):
+async def manual_recalculate(
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return {"status": "skipped", "users_updated": 0}
     try:
@@ -570,17 +859,31 @@ async def manual_recalculate(_token: dict = Depends(verify_supabase_token)):
         updated = 0
         for user in users:
             try:
-                roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
+                roster = (
+                    db.query(FantasyRoster)
+                    .filter(FantasyRoster.user_id == user.id)
+                    .first()
+                )
                 if roster:
-                    fantasy_pts = sum(p.points_total for p in roster.players)
+                    fantasy_pts = sum(
+                        (p.points_total or 0) for p in roster.players
+                    )
                     if roster.coach:
-                        fantasy_pts += roster.coach.points_total
+                        fantasy_pts += (roster.coach.points_total or 0)
                     user.score_fantasy = fantasy_pts
-                prono_pts = db.query(PredictionScore).filter(PredictionScore.user_id == user.id).all()
-                user.score_predictor_scores = sum(p.points_earned for p in prono_pts)
+
+                prono_list = (
+                    db.query(PredictionScore)
+                    .filter(PredictionScore.user_id == user.id)
+                    .all()
+                )
+                user.score_predictor_scores = sum(
+                    (p.points_earned or 0) for p in prono_list
+                )
                 updated += 1
             except Exception as e:
                 logger.warning(f"Recalcul user {user.id} échoué : {e}")
+
         db.commit()
         db.close()
         return {"status": "recalculated", "users_updated": updated}
@@ -592,21 +895,35 @@ async def manual_recalculate(_token: dict = Depends(verify_supabase_token)):
 # ── Complaints ────────────────────────────────────────────────────────────────
 
 @app.post("/complaints")
-async def submit_complaint(payload: ComplaintPayload,
-                           _token: dict = Depends(verify_supabase_token)):
+async def submit_complaint(
+    payload: ComplaintPayload,
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return {"status": "submitted", "complaint_id": 1}
     try:
         db = SessionLocal()
-        user = db.query(User).filter(User.id == int(payload.user_id)).first()
+        user = None
+        try:
+            uid_int = int(payload.user_id)
+            user = db.query(User).filter(User.id == uid_int).first()
+        except (ValueError, TypeError):
+            user = db.query(User).filter(User.email == payload.user_id).first()
+
         if not user:
             db.close()
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+
         complaint = Complaint(
-            user_id=user.id, match_id=payload.match_id, player_id=payload.player_id,
+            user_id=user.id,
+            match_id=payload.match_id,
+            player_id=payload.player_id,
             description=payload.description,
-            stat_claimed=json.dumps(payload.stat_claimed) if payload.stat_claimed else None,
-            status="pending", created_at=datetime.utcnow().isoformat(),
+            stat_claimed=(
+                json.dumps(payload.stat_claimed) if payload.stat_claimed else None
+            ),
+            status="pending",
+            created_at=datetime.utcnow().isoformat(),
         )
         db.add(complaint)
         db.commit()
@@ -614,6 +931,7 @@ async def submit_complaint(payload: ComplaintPayload,
         complaint_id = complaint.id
         db.close()
         return {"status": "submitted", "complaint_id": complaint_id}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -622,27 +940,39 @@ async def submit_complaint(payload: ComplaintPayload,
 
 
 @app.get("/complaints")
-async def get_all_complaints(_token: dict = Depends(verify_supabase_token)):
+async def get_all_complaints(
+    _token: dict = Depends(verify_supabase_token),
+):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
         return []
     try:
         db = SessionLocal()
-        complaints = db.query(Complaint).order_by(Complaint.id.desc()).all()
+        complaints = (
+            db.query(Complaint).order_by(Complaint.id.desc()).all()
+        )
         result = []
         for c in complaints:
             try:
                 u = db.query(User).filter(User.id == c.user_id).first()
-                result.append({"id": c.id, "user_id": c.user_id,
-                                "username": u.username if u else "?",
-                                "match_id": c.match_id, "player_id": c.player_id,
-                                "description": c.description, "status": c.status,
-                                "created_at": c.created_at, "resolved_at": c.resolved_at})
+                result.append(
+                    {
+                        "id": c.id,
+                        "user_id": c.user_id,
+                        "username": u.username if u else "?",
+                        "match_id": c.match_id,
+                        "player_id": c.player_id,
+                        "description": c.description,
+                        "status": c.status,
+                        "created_at": c.created_at,
+                        "resolved_at": c.resolved_at,
+                    }
+                )
             except Exception:
                 continue
         db.close()
         return result
     except Exception as e:
-        logger.error(f"Erreur /complaints : {e}")
+        logger.error(f"Erreur GET /complaints : {e}")
         return []
 
 
