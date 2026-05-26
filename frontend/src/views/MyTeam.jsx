@@ -253,4 +253,4 @@ export default function MyTeam() {
       </div>
     </div>
   );
-}
+}s
