@@ -6,9 +6,6 @@
 //   • En production     : VITE_API_BASE doit pointer vers le backend Render.com
 //     Ex : https://fantasy-boulzazen-api.onrender.com
 //
-// Pour activer le mode prod local sans proxy, crée un .env.local :
-//   VITE_API_BASE=http://localhost:8000
-//
 const isProd = import.meta.env.PROD;
 
 export const API_BASE = isProd
@@ -19,6 +16,11 @@ export const API_BASE = isProd
 export const SUPABASE_URL = "https://selkpaowxwjjfteadjvz.supabase.co";
 export const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNlbGtwYW93eHdqamZ0ZWFkanZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2NDI0NjksImV4cCI6MjA5NTIxODQ2OX0.c2_RCi7Qn9pvNzPcAG8Lcd1SMKBFzthBactVizFHJ9w";
+
+// ─── Groq AI — Clé API ────────────────────────────────────────────────────────
+// Utilisée dans AdminPanel.jsx pour l'analyse automatique des plaintes
+// via le modèle llama3-8b-8192 de Groq
+export const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY || "";
 
 // IDs admin Supabase (liste blanche des emails autorisés à voir le panel admin)
 // À adapter avec les vrais emails des admins de la ligue

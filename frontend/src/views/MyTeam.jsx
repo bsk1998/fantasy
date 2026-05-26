@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { API_BASE } from '../config';
 
 export default function MyTeam() {
   const [players, setPlayers] = useState([]);
@@ -19,8 +20,8 @@ export default function MyTeam() {
     const loadMarketData = async () => {
       try {
         const [resPlayers, resCoaches] = await Promise.all([
-          fetch('http://127.0.0.1:8000/players'),
-          fetch('http://127.0.0.1:8000/coaches')
+          fetch(`${API_BASE}/api/players`),
+          fetch(`${API_BASE}/api/coaches`)
         ]);
 
         if (!resPlayers.ok || !resCoaches.ok) throw new Error("Échec du chargement du mercato.");
@@ -134,14 +135,13 @@ export default function MyTeam() {
         </div>
       </div>
 
-      {/* DISPOSITION MAIN GRILLE (CÔTE À CÔTE DESKTOP, EMPILÉ MOBILE) */}
+      {/* DISPOSITION MAIN GRILLE */}
       <div className="fantasy-main-layout">
         
-        {/* TERRAIN DU COMPOSANT (COTE GAUCHE) */}
+        {/* TERRAIN */}
         <div className="pitch-section">
           <div className="real-pitch">
             
-            {/* LIGNES & ZONE DE BUTS (DECORATION) */}
             <div className="goal-area top"></div>
             <div className="penalty-area top"></div>
             <div className="penalty-spot top"></div>
@@ -151,7 +151,6 @@ export default function MyTeam() {
             <div className="penalty-area bottom"></div>
             <div className="goal-area bottom"></div>
 
-            {/* ENTRAÎNEUR (POSITION FIXE) */}
             <div className="coach-spot-wrapper">
               {selectedCoach ? (
                 <div className="badge coach-badge active" onClick={() => handleSelectCoach(selectedCoach)} title="Retirer Coach">
@@ -162,14 +161,12 @@ export default function MyTeam() {
               )}
             </div>
 
-            {/* LIGNES DE JOUEURS */}
             <div className="pitch-row attack-line">{renderPitchRow('A', slots.A)}</div>
             <div className="pitch-row midfield-line">{renderPitchRow('M', slots.M)}</div>
             <div className="pitch-row defense-line">{renderPitchRow('D', slots.D)}</div>
             <div className="pitch-row goalkeeper-line">{renderPitchRow('G', 1)}</div>
           </div>
 
-          {/* BANC DES REMPLAÇANTS */}
           <div className="bench">
             <span className="bench-label">Effectif ({roster.length}/15)</span>
             {roster.map(p => (
@@ -178,7 +175,7 @@ export default function MyTeam() {
           </div>
         </div>
 
-        {/* MARCHÉ EMBARQUÉ (COTE DROIT DESKTOP, EMPILÉ MOBILE) */}
+        {/* MARCHÉ */}
         <div className="market-section card">
           <div className="tab-bar">
             <button className={marketType === 'players' ? 'active' : ''} onClick={() => setMarketType('players')}>Joueurs</button>
@@ -197,7 +194,6 @@ export default function MyTeam() {
                   </div>
                 </div>
 
-                {/* LISTE DES JOUEURS */}
                 <div className="market-list">
                   {filteredPlayers.map(player => {
                     const isBought = roster.find(p => p.id === player.id);
@@ -224,7 +220,6 @@ export default function MyTeam() {
                 </div>
               </>
             ) : (
-              /* LISTE DES ENTRAÎNEURS */
               <div className="market-list">
                 {coaches.map(coach => {
                   const isSelected = selectedCoach && selectedCoach.id === coach.id;
@@ -253,4 +248,4 @@ export default function MyTeam() {
       </div>
     </div>
   );
-}s
+}

@@ -39,7 +39,6 @@ const ANNEXE_CATEGORIES = [
 
 const POINTS_COLORS = { 5: 'var(--green)', 2: 'var(--warning)', 0: 'var(--text-3)' };
 
-// ─── Helpers ─────────────────────────────────────────────────────
 const buildEmptyKnockout = () => {
   const rounds = {};
   KNOCKOUT_ROUNDS.forEach(r => {
@@ -62,7 +61,6 @@ const buildEmptyAnnexes = () =>
 //  SOUS-COMPOSANTS
 // ══════════════════════════════════════════════════════════════════
 
-// ─── Chip statut de sauvegarde ─────────────────────────────────
 function SaveChip({ status }) {
   if (!status) return null;
   const map = {
@@ -76,13 +74,11 @@ function SaveChip({ status }) {
   );
 }
 
-// ─── Ligne de match (onglet Scores) ───────────────────────────
-function MatchRow({ match, prediction, savedPrediction, onSave }) {
-  const [home, setHome] = useState(prediction?.home ?? '');
-  const [away, setAway] = useState(prediction?.away ?? '');
+function MatchRow({ match, savedPrediction, onSave }) {
+  const [home, setHome] = useState('');
+  const [away, setAway] = useState('');
   const [status, setStatus] = useState(null);
 
-  // Sync si prédiction chargée depuis API
   useEffect(() => {
     if (savedPrediction) {
       setHome(String(savedPrediction.predicted_home ?? ''));
@@ -106,7 +102,6 @@ function MatchRow({ match, prediction, savedPrediction, onSave }) {
 
   return (
     <div className={`match-row-card ${isLocked ? 'locked' : ''} ${isFinished ? 'finished' : ''}`}>
-      {/* Groupe */}
       <div className="mrg-meta">
         <span className="mrg-group">{match.group}</span>
         <span className="mrg-date">{match.date}</span>
@@ -118,7 +113,6 @@ function MatchRow({ match, prediction, savedPrediction, onSave }) {
         )}
       </div>
 
-      {/* Rangée équipes + score */}
       <div className="mrg-main">
         <div className="team-side home">{match.home}</div>
 
@@ -153,7 +147,6 @@ function MatchRow({ match, prediction, savedPrediction, onSave }) {
         <div className="team-side away">{match.away}</div>
       </div>
 
-      {/* Prono précédent + bouton save */}
       {!isLocked && !isFinished && (
         <div className="mrg-footer">
           {savedPrediction && (
@@ -177,7 +170,6 @@ function MatchRow({ match, prediction, savedPrediction, onSave }) {
   );
 }
 
-// ─── Accordéon de groupe (onglet Bracket) ─────────────────────
 function GroupAccordion({ groupKey, teams, ranking, onChange }) {
   const [open, setOpen] = useState(false);
 
@@ -247,7 +239,6 @@ function GroupAccordion({ groupKey, teams, ranking, onChange }) {
   );
 }
 
-// ─── Colonne d'un round knockout ──────────────────────────────
 function KnockoutRound({ roundKey, matches, onChange }) {
   return (
     <div className="ko-round">
@@ -282,7 +273,6 @@ function KnockoutRound({ roundKey, matches, onChange }) {
   );
 }
 
-// ─── Ligne Top-3 annexes ────────────────────────────────────────
 function AnnexeRow({ catKey, label, placeholder, values, onChange }) {
   return (
     <div className="annexe-block card">
@@ -312,27 +302,22 @@ function AnnexeRow({ catKey, label, placeholder, values, onChange }) {
 export default function Predictions() {
   const { user, session } = useApp();
 
-  // ── Navigation ────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState('scores');
 
-  // ── Tab Scores ────────────────────────────────────────────────
   const [matches,          setMatches]          = useState([]);
   const [savedPredictions, setSavedPredictions] = useState({});
   const [loadingMatches,   setLoadingMatches]   = useState(true);
   const [matchError,       setMatchError]       = useState(null);
 
-  // ── Tab Bracket ───────────────────────────────────────────────
   const [groups,        setGroups]        = useState(buildEmptyGroups);
   const [knockout,      setKnockout]      = useState(buildEmptyKnockout);
   const [bracketSaving, setBracketSaving] = useState(false);
-  const [bracketStatus, setBracketStatus] = useState(null); // 'saved' | 'error'
+  const [bracketStatus, setBracketStatus] = useState(null);
 
-  // ── Tab Annexes ───────────────────────────────────────────────
   const [annexes,        setAnnexes]        = useState(buildEmptyAnnexes);
   const [annexesSaving,  setAnnexesSaving]  = useState(false);
   const [annexesStatus,  setAnnexesStatus]  = useState(null);
 
-  // ── Initialisation des classements de groupe ──────────────────
   useEffect(() => {
     setGroups(
       Object.fromEntries(
@@ -341,7 +326,6 @@ export default function Predictions() {
     );
   }, []);
 
-  // ── Header Auth ───────────────────────────────────────────────
   const authHeaders = useCallback(() => ({
     'Content-Type': 'application/json',
     ...(session?.access_token
@@ -349,16 +333,16 @@ export default function Predictions() {
       : {}),
   }), [session]);
 
-  // ── Fetch matchs + pronos existants ───────────────────────────
+  // ✅ FIX : tous les fetch utilisent maintenant le préfixe /api
   useEffect(() => {
     const load = async () => {
       setLoadingMatches(true);
       setMatchError(null);
       try {
         const [resMatches, resPronos] = await Promise.all([
-          fetch(`${API_BASE}/matches`),
+          fetch(`${API_BASE}/api/matches`),
           user?.id
-            ? fetch(`${API_BASE}/predictions/score/${user.id}`, { headers: authHeaders() })
+            ? fetch(`${API_BASE}/api/predictions/score/${user.id}`, { headers: authHeaders() })
             : Promise.resolve(null),
         ]);
 
@@ -382,11 +366,10 @@ export default function Predictions() {
     load();
   }, [user?.id]);
 
-  // ── Sauvegarder un prono de score ─────────────────────────────
   const handleSaveScore = useCallback(async (matchId, home, away) => {
     if (!user?.id) return 'no_user';
     try {
-      const res = await fetch(`${API_BASE}/predictions/score`, {
+      const res = await fetch(`${API_BASE}/api/predictions/score`, {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({
@@ -407,12 +390,10 @@ export default function Predictions() {
     }
   }, [user?.id, authHeaders]);
 
-  // ── Modifier un groupe (bracket) ──────────────────────────────
   const handleGroupChange = useCallback((groupKey, newRanking) => {
     setGroups(prev => ({ ...prev, [groupKey]: newRanking }));
   }, []);
 
-  // ── Modifier un match knockout ────────────────────────────────
   const handleKnockoutChange = useCallback((roundKey, matchIdx, field, value) => {
     setKnockout(prev => {
       const round = Array.isArray(prev[roundKey]) ? [...prev[roundKey]] : { ...prev[roundKey] };
@@ -432,20 +413,18 @@ export default function Predictions() {
     }));
   }, []);
 
-  // ── Sauvegarder le bracket ────────────────────────────────────
   const handleSaveBracket = async () => {
     if (!user?.id) return;
     setBracketSaving(true);
     setBracketStatus(null);
     try {
-      const bracketPayload = {
-        user_id: String(user.id),
-        bracket_data: { groupes: groups, ...knockout },
-      };
-      const res = await fetch(`${API_BASE}/predictions/bracket`, {
+      const res = await fetch(`${API_BASE}/api/predictions/bracket`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify(bracketPayload),
+        body: JSON.stringify({
+          user_id: String(user.id),
+          bracket_data: { groupes: groups, ...knockout },
+        }),
       });
       setBracketStatus(res.ok ? 'saved' : 'error');
     } catch {
@@ -456,18 +435,16 @@ export default function Predictions() {
     }
   };
 
-  // ── Modifier annexes ──────────────────────────────────────────
   const handleAnnexeChange = useCallback((catKey, newValues) => {
     setAnnexes(prev => ({ ...prev, [catKey]: newValues }));
   }, []);
 
-  // ── Sauvegarder annexes ───────────────────────────────────────
   const handleSaveAnnexes = async () => {
     if (!user?.id) return;
     setAnnexesSaving(true);
     setAnnexesStatus(null);
     try {
-      const res = await fetch(`${API_BASE}/predictions/annexes`, {
+      const res = await fetch(`${API_BASE}/api/predictions/annexes`, {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ user_id: String(user.id), annexes }),
@@ -481,7 +458,6 @@ export default function Predictions() {
     }
   };
 
-  // ── Grouper les matchs par groupe ─────────────────────────────
   const matchesByGroup = matches.reduce((acc, m) => {
     const g = m.group || 'Autre';
     if (!acc[g]) acc[g] = [];
@@ -492,11 +468,9 @@ export default function Predictions() {
   const pronosRemplis  = Object.keys(savedPredictions).length;
   const totalMatchs    = matches.filter(m => !m.is_finished && !m.is_locked).length;
 
-  // ─────────────────────────────────────────────────────────────
   return (
     <div className="predictions-view">
 
-      {/* ── HEADER ─────────────────────────────────────────── */}
       <div className="pred-header">
         <div>
           <h2>🎯 Pronostics</h2>
@@ -510,7 +484,6 @@ export default function Predictions() {
         </div>
       </div>
 
-      {/* ── ONGLETS ────────────────────────────────────────── */}
       <div className="pred-tabs">
         {[
           { key: 'scores',  label: '📊 Scores' },
@@ -527,9 +500,6 @@ export default function Predictions() {
         ))}
       </div>
 
-      {/* ══════════════════════════════════════════════════════
-          TAB 1 — SCORES
-          ══════════════════════════════════════════════════ */}
       {activeTab === 'scores' && (
         <div className="tab-content fade-in">
           <div className="predictions-card">
@@ -563,7 +533,6 @@ export default function Predictions() {
                   <MatchRow
                     key={match.id}
                     match={match}
-                    prediction={null}
                     savedPrediction={savedPredictions[match.id]}
                     onSave={handleSaveScore}
                   />
@@ -574,13 +543,9 @@ export default function Predictions() {
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════
-          TAB 2 — BRACKET
-          ══════════════════════════════════════════════════ */}
       {activeTab === 'bracket' && (
         <div className="tab-content fade-in">
 
-          {/* Phase de groupes */}
           <div className="bracket-section-title">
             <span>Phase de Groupes</span>
             <span className="bst-pts">+5 pts par classement exact</span>
@@ -598,7 +563,6 @@ export default function Predictions() {
             ))}
           </div>
 
-          {/* Phase éliminatoire */}
           <div className="bracket-section-title" style={{ marginTop: 8 }}>
             <span>Phase Éliminatoire</span>
             <span className="bst-pts">+5 pts présence · +5 match · +5 vainqueur</span>
@@ -614,7 +578,6 @@ export default function Predictions() {
               />
             ))}
 
-            {/* 3ème place */}
             <div className="ko-round">
               <div className="ko-round-label" style={{ color: 'var(--warning)' }}>🥉 Match 3ème place</div>
               <div className="ko-match">
@@ -635,7 +598,6 @@ export default function Predictions() {
               </div>
             </div>
 
-            {/* Finale */}
             <div className="ko-round">
               <div className="ko-round-label" style={{ color: 'var(--gold)' }}>🏆 FINALE</div>
               <div className="ko-match finale-match">
@@ -657,7 +619,6 @@ export default function Predictions() {
             </div>
           </div>
 
-          {/* Bouton sauvegarde bracket */}
           <div className="pred-save-bar">
             <SaveChip status={bracketStatus} />
             <button
@@ -671,9 +632,6 @@ export default function Predictions() {
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════
-          TAB 3 — ANNEXES
-          ══════════════════════════════════════════════════ */}
       {activeTab === 'annexes' && (
         <div className="tab-content fade-in">
           <div className="predictions-card" style={{ padding: '12px 14px 4px' }}>

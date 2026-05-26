@@ -8,7 +8,8 @@ export default function Leaderboard() {
   const [sortKey, setSortKey] = useState("total");
 
   useEffect(() => {
-    fetch(`${API_BASE}/leaderboard`)
+    // ✅ FIX : ajout du préfixe /api pour le proxy Vite
+    fetch(`${API_BASE}/api/leaderboard`)
       .then((r) => r.json())
       .then(setData)
       .catch(console.error);

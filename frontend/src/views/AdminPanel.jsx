@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useApp } from '../App';
-import { API_BASE } from '../config';
+import { API_BASE, GROQ_API_KEY as DEFAULT_GROQ_KEY } from '../config';
 
 // ═══════════════════════════════════════════════════════════════
 //  CONFIG
@@ -45,13 +45,11 @@ function loadAllComplaints() {
 }
 
 function updateComplaintInStorage(id, patch) {
-  // Mettre à jour dans la liste globale
   try {
     const all = loadAllComplaints().map(c => c.id === id ? { ...c, ...patch } : c);
     localStorage.setItem(ALL_COMPLAINTS_KEY, JSON.stringify(all));
   } catch { /* silencieux */ }
 
-  // Mettre à jour dans la liste de l'utilisateur propriétaire
   try {
     const owner = loadAllComplaints().find(c => c.id === id)?.user_id;
     if (owner) {
@@ -138,7 +136,6 @@ Rends un verdict juste et équilibré.`;
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || '';
 
-  // Parser le JSON de la réponse
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('Réponse Groq invalide (pas de JSON)');
   return JSON.parse(match[0]);
@@ -194,7 +191,6 @@ function AIAnalysis({ analysis, onApply }) {
       borderRadius: 10, padding: '12px 14px',
       display: 'flex', flexDirection: 'column', gap: 10,
     }}>
-      {/* En-tête */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{
@@ -213,7 +209,6 @@ function AIAnalysis({ analysis, onApply }) {
         </div>
       </div>
 
-      {/* Résumé */}
       <div>
         <div style={{ fontSize: '0.68rem', color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 4 }}>
           Verdict IA
@@ -223,7 +218,6 @@ function AIAnalysis({ analysis, onApply }) {
         </p>
       </div>
 
-      {/* Raisonnement */}
       <div>
         <div style={{ fontSize: '0.68rem', color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 4 }}>
           Analyse
@@ -233,7 +227,6 @@ function AIAnalysis({ analysis, onApply }) {
         </p>
       </div>
 
-      {/* Action + Impact */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {analysis.action && (
           <div style={{
@@ -263,7 +256,6 @@ function AIAnalysis({ analysis, onApply }) {
         )}
       </div>
 
-      {/* Boutons appliquer */}
       <div style={{ display: 'flex', gap: 6 }}>
         <button type="button" onClick={() => onApply('approved', analysis)}
           style={actionBtn('#00e676')}>
@@ -350,7 +342,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
       borderRadius: 12, overflow: 'hidden',
       transition: 'border-color 0.2s',
     }}>
-      {/* Header */}
       <button type="button" onClick={() => setExpanded(o => !o)}
         style={{
           width: '100%', background: 'none', border: 'none',
@@ -359,7 +350,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
           textAlign: 'left',
         }}>
 
-        {/* Indicateur priorité */}
         <span style={{
           display: 'inline-block', width: 8, height: 8,
           borderRadius: '50%', background: priorityCfg.color,
@@ -397,7 +387,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
         </div>
       </button>
 
-      {/* Corps */}
       {expanded && (
         <div style={{
           padding: '0 12px 12px',
@@ -405,8 +394,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
           paddingTop: 12,
           display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-
-          {/* Description */}
           <div style={{
             background: 'var(--surface-2)', borderRadius: 8, padding: '10px 12px',
           }}>
@@ -422,7 +409,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
             )}
           </div>
 
-          {/* Bouton analyse IA */}
           {complaint.status === 'pending' && (
             <>
               <button type="button" onClick={handleAnalyze}
@@ -455,12 +441,10 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
                 </div>
               )}
 
-              {/* Résultat analyse */}
               {analysis && (
                 <AIAnalysis analysis={analysis} onApply={handleApply} />
               )}
 
-              {/* Actions manuelles */}
               <div>
                 <div style={sectionLabel}>Réponse manuelle (optionnel)</div>
                 <textarea rows={3}
@@ -502,7 +486,6 @@ function AdminComplaintCard({ complaint, groqKey, onUpdate }) {
             </>
           )}
 
-          {/* Réclamation déjà traitée */}
           {complaint.status !== 'pending' && complaint.admin_response && (
             <div style={{
               background: complaint.status === 'approved'
@@ -568,13 +551,25 @@ export default function AdminPanel() {
   const [loading,       setLoading]       = useState(true);
   const [filterStatus,  setFilterStatus]  = useState('pending');
   const [filterSearch,  setFilterSearch]  = useState('');
-  const [groqKey,       setGroqKey]       = useState(() => localStorage.getItem(GROQ_KEY_STORAGE) || '');
+
+  // ── Clé Groq : priorité localStorage, sinon clé par défaut du config ──────
+  const [groqKey, setGroqKey] = useState(() => {
+    const stored = localStorage.getItem(GROQ_KEY_STORAGE);
+    if (stored) return stored;
+    // Pré-remplir avec la clé par défaut et la sauvegarder
+    if (DEFAULT_GROQ_KEY) {
+      localStorage.setItem(GROQ_KEY_STORAGE, DEFAULT_GROQ_KEY);
+      return DEFAULT_GROQ_KEY;
+    }
+    return '';
+  });
+
   const [showKeyInput,  setShowKeyInput]  = useState(false);
   const [tempKey,       setTempKey]       = useState('');
   const [keyVisible,    setKeyVisible]    = useState(false);
   const [recalcStatus,  setRecalcStatus]  = useState(null);
   const [recalcLoading, setRecalcLoading] = useState(false);
-  const [activeTab,     setActiveTab]     = useState('complaints'); // 'complaints' | 'stats' | 'settings'
+  const [activeTab,     setActiveTab]     = useState('complaints');
 
   const loadComplaints = useCallback(() => {
     const all = loadAllComplaints().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -584,7 +579,6 @@ export default function AdminPanel() {
 
   useEffect(() => { loadComplaints(); }, [loadComplaints]);
 
-  // Sécurité admin
   if (!isAdmin) {
     return (
       <div className="view">
@@ -620,7 +614,6 @@ export default function AdminPanel() {
     localStorage.removeItem(GROQ_KEY_STORAGE);
   };
 
-  // Recalcul des scores via le backend
   const handleRecalculate = async () => {
     setRecalcLoading(true);
     setRecalcStatus(null);
@@ -643,7 +636,6 @@ export default function AdminPanel() {
     }
   };
 
-  // Filtrage
   const filtered = complaints.filter(c => {
     const matchStatus = filterStatus === 'all' || c.status === filterStatus;
     const q = filterSearch.toLowerCase();
@@ -653,7 +645,6 @@ export default function AdminPanel() {
     return matchStatus && matchSearch;
   });
 
-  // Compteurs
   const counts = {
     all:        complaints.length,
     pending:    complaints.filter(c => c.status === 'pending').length,
@@ -688,6 +679,19 @@ export default function AdminPanel() {
             }}>
               🛡️ PANNEAU ADMINISTRATEUR
             </div>
+
+            {/* Badge clé Groq active */}
+            {groqKey && (
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                background: 'rgba(0,230,118,0.1)', border: '1px solid rgba(0,230,118,0.3)',
+                borderRadius: 50, padding: '2px 10px', marginBottom: 8, marginLeft: 6,
+                fontSize: '0.65rem', fontWeight: 700, color: 'var(--green)',
+              }}>
+                🤖 Groq IA · Actif
+              </div>
+            )}
+
             <h2 style={{ margin: 0, fontSize: '1.2rem', letterSpacing: '0.08em', lineHeight: 1.2 }}>
               Admin · Ligue Boulzazen
             </h2>
@@ -742,7 +746,6 @@ export default function AdminPanel() {
           ════════════════════════════════════════════════ */}
       {activeTab === 'complaints' && (
         <>
-          {/* Filtres */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             <input type="text"
               placeholder="🔍 Rechercher par titre, joueur, description..."
@@ -773,7 +776,6 @@ export default function AdminPanel() {
             </div>
           </div>
 
-          {/* Liste des plaintes */}
           {loading ? (
             <div className="loading-spinner">Chargement des plaintes...</div>
           ) : filtered.length === 0 ? (
@@ -799,7 +801,6 @@ export default function AdminPanel() {
             </div>
           )}
 
-          {/* Bouton recalcul global */}
           <div style={{ paddingTop: 4 }}>
             {recalcStatus && (
               <div style={{
@@ -835,13 +836,12 @@ export default function AdminPanel() {
       {activeTab === 'stats' && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <StatsCard label="TOTAL" value={counts.all}        color="#a78bfa" icon="🚩" />
-            <StatsCard label="ATTENTE" value={counts.pending}  color="#f59e0b" icon="⏳" />
+            <StatsCard label="TOTAL" value={counts.all}          color="#a78bfa" icon="🚩" />
+            <StatsCard label="ATTENTE" value={counts.pending}    color="#f59e0b" icon="⏳" />
             <StatsCard label="ACCEPTÉES" value={counts.approved} color="#00e676" icon="✅" />
             <StatsCard label="REJETÉES" value={counts.rejected}  color="#f43f5e" icon="❌" />
           </div>
 
-          {/* Taux de résolution */}
           {counts.all > 0 && (
             <div style={{
               background: 'var(--surface)', border: '1px solid var(--border)',
@@ -875,7 +875,6 @@ export default function AdminPanel() {
             </div>
           )}
 
-          {/* Par catégorie */}
           <div style={{
             background: 'var(--surface)', border: '1px solid var(--border)',
             borderRadius: 12, padding: 14,
@@ -902,7 +901,6 @@ export default function AdminPanel() {
           ════════════════════════════════════════════════ */}
       {activeTab === 'settings' && (
         <>
-          {/* Groq API Key */}
           <div style={{
             background: 'var(--surface)', border: '1px solid var(--border)',
             borderRadius: 12, padding: 14,
@@ -913,22 +911,17 @@ export default function AdminPanel() {
                 🤖 Groq IA — Clé API
               </h3>
               <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--text-2)', lineHeight: 1.5 }}>
-                La clé Groq est utilisée pour analyser automatiquement les plaintes via le modèle{' '}
+                Modèle actif :{' '}
                 <code style={{ background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 4, fontSize: '0.75rem' }}>
                   {GROQ_MODEL}
-                </code>.
-                Obtenez une clé gratuite sur{' '}
-                <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer"
-                  style={{ color: 'var(--accent)' }}>
-                  console.groq.com
-                </a>
+                </code>
               </p>
             </div>
 
             {groqKey ? (
               <div>
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-                  Clé enregistrée
+                  Clé active ✅
                 </div>
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 8,
@@ -963,9 +956,9 @@ export default function AdminPanel() {
                   borderRadius: 7, padding: '8px 12px', marginBottom: 10,
                   fontSize: '0.75rem', color: '#f59e0b',
                 }}>
-                  ⚠ Aucune clé API Groq configurée. L'analyse IA des plaintes est désactivée.
+                  ⚠ Aucune clé API Groq configurée.
                 </div>
-                {!showKeyInput ? (
+                {!showKeyInput && (
                   <button type="button" onClick={() => setShowKeyInput(true)}
                     style={{
                       width: '100%', padding: '10px',
@@ -975,14 +968,14 @@ export default function AdminPanel() {
                     }}>
                     🔑 Configurer la clé Groq API
                   </button>
-                ) : null}
+                )}
               </div>
             )}
 
             {showKeyInput && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-                  Saisir la clé
+                  Nouvelle clé
                 </div>
                 <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                   <input
@@ -1021,7 +1014,6 @@ export default function AdminPanel() {
             )}
           </div>
 
-          {/* Nettoyage des données */}
           <div style={{
             background: 'var(--surface)', border: '1px solid var(--border)',
             borderRadius: 12, padding: 14,
@@ -1053,20 +1045,6 @@ export default function AdminPanel() {
               }}>
               🔄 Recharger les plaintes
             </button>
-          </div>
-
-          {/* Info */}
-          <div style={{
-            background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: 12, padding: 14, fontSize: '0.75rem',
-            color: 'var(--text-2)', lineHeight: 1.6,
-          }}>
-            <div style={{ fontWeight: 700, color: 'var(--text-3)', marginBottom: 6, fontSize: '0.68rem', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-              ℹ️ Informations techniques
-            </div>
-            Les plaintes sont stockées localement dans le navigateur (localStorage) pour les prototypes.
-            En production, migrez vers une table Supabase <code style={{ background: 'var(--surface-2)', padding: '1px 4px', borderRadius: 3 }}>complaints</code>.
-            La clé Groq est chiffrée en mémoire locale uniquement.
           </div>
         </>
       )}

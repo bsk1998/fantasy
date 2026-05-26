@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { useApp } from '../App';
 import { API_BASE } from '../config';
 
-// ─── Icônes inline ────────────────────────────────────────────────
 const TrophyIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <polyline points="8,21 12,21 16,21"/><line x1="12" y1="17" x2="12" y2="21"/>
@@ -40,17 +39,14 @@ const RefreshIcon = ({ spinning }) => (
   </svg>
 );
 
-// ─── Médailles podium ─────────────────────────────────────────────
 const MEDALS  = ['🥇', '🥈', '🥉'];
 const MEDALS_COLORS = ['#ffd700', '#94a3b8', '#b5703a'];
 
-// ─── Calcul du rang + progression ─────────────────────────────────
 function getRankSuffix(n) {
   if (n === 1) return 'er';
   return 'ème';
 }
 
-// ─── Composant carte score mode ───────────────────────────────────
 function ScoreCard({ label, value, icon, color, sublabel }) {
   return (
     <div className="score-mode-card" style={{ '--card-accent': color }}>
@@ -64,7 +60,6 @@ function ScoreCard({ label, value, icon, color, sublabel }) {
   );
 }
 
-// ─── Composant ligne classement ───────────────────────────────────
 function LeaderboardRow({ entry, index, currentUsername }) {
   const isSelf = entry.username === currentUsername;
   const medal  = MEDALS[index];
@@ -72,12 +67,9 @@ function LeaderboardRow({ entry, index, currentUsername }) {
 
   return (
     <div className={`lb-row ${isPodium ? 'is-podium' : ''} ${isSelf ? 'is-self' : ''}`}>
-      {/* Rang */}
       <div className="lb-row-rank">
         {medal || <span className="lb-row-num">{index + 1}</span>}
       </div>
-
-      {/* Nom */}
       <div className="lb-row-info">
         <span className="lb-row-name">
           {entry.username}
@@ -89,8 +81,6 @@ function LeaderboardRow({ entry, index, currentUsername }) {
           <span style={{ color: 'var(--gold)' }}>🗺️ {entry.bracket ?? entry.score_predictor_tableaux ?? 0}</span>
         </div>
       </div>
-
-      {/* Total */}
       <div className="lb-row-total" style={{ color: isPodium ? MEDALS_COLORS[index] : 'var(--text)' }}>
         {entry.total ?? 0}
         <span className="lb-row-pts">pts</span>
@@ -99,9 +89,6 @@ function LeaderboardRow({ entry, index, currentUsername }) {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════
-//  DASHBOARD PRINCIPAL
-// ══════════════════════════════════════════════════════════════════
 export default function Dashboard() {
   const { user, syncData } = useApp();
 
@@ -112,14 +99,14 @@ export default function Dashboard() {
   const [userRank,    setUserRank]    = useState(null);
   const [error,       setError]       = useState(null);
 
-  // ── Chargement du classement ──────────────────────────────────
   const fetchLeaderboard = async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/leaderboard`);
+      // ✅ FIX : ajout du préfixe /api pour le proxy Vite
+      const res = await fetch(`${API_BASE}/api/leaderboard`);
       if (!res.ok) throw new Error(`Erreur ${res.status}`);
       const data = await res.json();
       const sorted = Array.isArray(data)
@@ -128,7 +115,6 @@ export default function Dashboard() {
       setLeaderboard(sorted);
       setLastUpdated(new Date());
 
-      // Trouver le rang du joueur connecté
       if (user?.username) {
         const idx = sorted.findIndex(e => e.username === user.username);
         setUserRank(idx >= 0 ? idx + 1 : null);
@@ -143,27 +129,17 @@ export default function Dashboard() {
 
   useEffect(() => { fetchLeaderboard(); }, []);
 
-  // ── Calcul du score total user ────────────────────────────────
-  const totalScore  = (user?.score_fantasy ?? 0)
-                    + (user?.score_pronos_scores ?? 0)
-                    + (user?.score_bracket ?? 0)
-                    + (user?.total ?? 0); // fallback si total directement fourni
+  const displayTotal = user?.total ?? 0;
 
-  const displayTotal = user?.total ?? totalScore;
-
-  // ── Format heure mise à jour ──────────────────────────────────
   const updatedStr = lastUpdated
     ? lastUpdated.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
     : null;
 
-  // ── Top 3 pour le podium ──────────────────────────────────────
   const top3 = leaderboard.slice(0, 3);
-  const rest = leaderboard.slice(3);
 
   return (
     <div className="view dashboard-view">
 
-      {/* ── HERO UTILISATEUR ─────────────────────────────────── */}
       <div className="dash-hero">
         <div className="dash-hero-top">
           <div className="dash-hero-left">
@@ -183,7 +159,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Scores par mode */}
         <div className="dash-scores-grid">
           <ScoreCard
             label="Fantasy"
@@ -216,7 +191,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── BANNER SYNC ──────────────────────────────────────── */}
       {syncData && (
         <div className="sync-info-banner">
           <BoltIcon />
@@ -227,7 +201,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── CLASSEMENT ───────────────────────────────────────── */}
       <div className="dash-section-header">
         <h3>🏆 Classement de la Ligue</h3>
         <button
@@ -241,22 +214,18 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {/* Erreur */}
       {error && (
         <div className="dash-error">
           ⚠️ {error} — Le backend est peut-être hors ligne.
         </div>
       )}
 
-      {/* Chargement */}
       {loading && !error && (
         <div className="loading-spinner">Chargement du classement...</div>
       )}
 
-      {/* Podium top 3 */}
       {!loading && !error && top3.length > 0 && (
         <div className="dash-podium">
-          {/* 2ème */}
           {top3[1] && (
             <div className="podium-card second">
               <div className="podium-medal">🥈</div>
@@ -265,7 +234,6 @@ export default function Dashboard() {
               <div className="podium-bar" style={{ height: 50, background: '#94a3b8' }} />
             </div>
           )}
-          {/* 1er */}
           {top3[0] && (
             <div className="podium-card first">
               <div className="podium-crown">👑</div>
@@ -275,7 +243,6 @@ export default function Dashboard() {
               <div className="podium-bar" style={{ height: 70, background: 'var(--gold)' }} />
             </div>
           )}
-          {/* 3ème */}
           {top3[2] && (
             <div className="podium-card third">
               <div className="podium-medal">🥉</div>
@@ -287,7 +254,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Liste complète */}
       {!loading && !error && leaderboard.length > 0 && (
         <div className="card dash-lb-card">
           {leaderboard.map((entry, i) => (
@@ -301,7 +267,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* État vide */}
       {!loading && !error && leaderboard.length === 0 && (
         <div className="empty-state">
           <div className="empty-state-icon">🏟️</div>
@@ -310,7 +275,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── NOTE RÈGLES ──────────────────────────────────────── */}
       <div className="card dash-rules-hint">
         <div className="rules-hint-title">📋 Rappel du barème</div>
         <div className="rules-hint-grid">
