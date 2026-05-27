@@ -1,670 +1,386 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useApp } from '../App';
-import { API_BASE } from '../config';
+/* ═══════════════════════════════════════════════════════════════════
+   PREDICTIONS — CSS COMPLÉMENTAIRE (à importer dans index.css)
+   Tous les blocs de classes utilisés dans Predictions.jsx
+   ═══════════════════════════════════════════════════════════════════ */
 
-// ══════════════════════════════════════════════════════════════════
-//  DONNÉES STATIQUES — Structure CDM 2026
-// ══════════════════════════════════════════════════════════════════
-
-const CDM_GROUPS = {
-  A: ['USA', 'Canada', 'Mexique', 'Jamaïque'],
-  B: ['France', 'Belgique', 'Maroc', 'Tunisie'],
-  C: ['Brésil', 'Argentine', 'Uruguay', 'Équateur'],
-  D: ['Angleterre', 'Allemagne', 'Pays-Bas', 'Croatie'],
-  E: ['Espagne', 'Portugal', 'Turquie', 'Grèce'],
-  F: ['Japon', 'Corée du Sud', 'Australie', 'Iran'],
-  G: ['Sénégal', 'Algérie', 'Nigéria', "Côte d'Ivoire"],
-  H: ['Colombie', 'Pologne', 'Serbie', 'Suisse'],
-  I: ['Arabie Saoudite', 'Autriche', 'Slovaquie', 'Islande'],
-  J: ['Égypte', 'Pérou', 'Bolivie', 'Venezuela'],
-  K: ['Costa Rica', 'Panama', 'Honduras', 'Paraguay'],
-  L: ['Qatar', 'Arabie Saoudite', 'Irak', 'Syrie'],
-};
-
-const KNOCKOUT_ROUNDS = ['r32', 'r16', 'qf', 'sf'];
-const ROUND_LABELS = {
-  r32: '16èmes de finale',
-  r16: 'Huitièmes',
-  qf:  'Quarts',
-  sf:  'Demi-finales',
-};
-const ROUND_MATCH_COUNT = { r32: 16, r16: 8, qf: 4, sf: 2 };
-
-const ANNEXE_CATEGORIES = [
-  { key: 'top3_buteurs',  label: '⚽ Top 3 Buteurs',           placeholder: 'Ex: Mbappé' },
-  { key: 'top3_passeurs', label: '🎯 Top 3 Passeurs',           placeholder: 'Ex: Messi' },
-  { key: 'top3_joueurs',  label: '🌟 Top 3 Meilleurs joueurs',  placeholder: 'Ex: Vinicius' },
-  { key: 'top3_jeunes',   label: '🔥 Top 3 Meilleurs jeunes',   placeholder: 'Ex: Yamal' },
-];
-
-const POINTS_COLORS = { 5: 'var(--green)', 2: 'var(--warning)', 0: 'var(--text-3)' };
-
-const buildEmptyKnockout = () => {
-  const rounds = {};
-  KNOCKOUT_ROUNDS.forEach(r => {
-    rounds[r] = Array.from({ length: ROUND_MATCH_COUNT[r] }, (_, i) => ({
-      id: `${r}_${i}`, team1: '', team2: '', winner: '',
-    }));
-  });
-  rounds.troisieme_place = { team1: '', team2: '', winner: '' };
-  rounds.finale          = { team1: '', team2: '', winner: '' };
-  return rounds;
-};
-
-const buildEmptyGroups = () =>
-  Object.fromEntries(Object.keys(CDM_GROUPS).map(g => [g, ['', '', '', '']]));
-
-const buildEmptyAnnexes = () =>
-  Object.fromEntries(ANNEXE_CATEGORIES.map(c => [c.key, ['', '', '']]));
-
-// ══════════════════════════════════════════════════════════════════
-//  SOUS-COMPOSANTS
-// ══════════════════════════════════════════════════════════════════
-
-function SaveChip({ status }) {
-  if (!status) return null;
-  const map = {
-    saving: { text: '⏳', color: 'var(--text-2)' },
-    saved:  { text: '✓ Enregistré', color: 'var(--green)' },
-    error:  { text: '✗ Erreur', color: 'var(--danger)' },
-  };
-  const s = map[status];
-  return (
-    <span className="save-chip" style={{ color: s.color }}>{s.text}</span>
-  );
+/* ── HEADER PRÉDICTIONS ───────────────────────────────────────────── */
+.pred-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
 }
 
-function MatchRow({ match, savedPrediction, onSave }) {
-  const [home, setHome] = useState('');
-  const [away, setAway] = useState('');
-  const [status, setStatus] = useState(null);
+.pred-header h2 { margin: 0; font-size: 1.3rem; letter-spacing: 0.1em; }
 
-  useEffect(() => {
-    if (savedPrediction) {
-      setHome(String(savedPrediction.predicted_home ?? ''));
-      setAway(String(savedPrediction.predicted_away ?? ''));
-    }
-  }, [savedPrediction]);
-
-  const isLocked    = match.is_locked;
-  const isFinished  = match.is_finished;
-  const realHome    = match.home_score;
-  const realAway    = match.away_score;
-  const pts         = savedPrediction?.points_earned;
-
-  const handleSave = async () => {
-    if (home === '' || away === '') return;
-    setStatus('saving');
-    const err = await onSave(match.id, parseInt(home), parseInt(away));
-    setStatus(err ? 'error' : 'saved');
-    setTimeout(() => setStatus(null), 2500);
-  };
-
-  return (
-    <div className={`match-row-card ${isLocked ? 'locked' : ''} ${isFinished ? 'finished' : ''}`}>
-      <div className="mrg-meta">
-        <span className="mrg-group">{match.group}</span>
-        <span className="mrg-date">{match.date}</span>
-        {isLocked   && <span className="mrg-lock">🔒 Verrouillé</span>}
-        {isFinished && pts != null && (
-          <span className="mrg-pts" style={{ color: POINTS_COLORS[pts] ?? 'var(--text-2)' }}>
-            +{pts} pts
-          </span>
-        )}
-      </div>
-
-      <div className="mrg-main">
-        <div className="team-side home">{match.home}</div>
-
-        <div className="score-inputs-block">
-          {isFinished ? (
-            <div className="score-result">
-              <span>{realHome}</span>
-              <span className="score-divider">–</span>
-              <span>{realAway}</span>
-            </div>
-          ) : (
-            <>
-              <input
-                type="number" min="0" max="99"
-                className={`score-input-field ${isLocked ? 'disabled' : ''}`}
-                value={home}
-                onChange={e => setHome(e.target.value.replace(/\D/, ''))}
-                disabled={isLocked}
-              />
-              <span className="score-divider">–</span>
-              <input
-                type="number" min="0" max="99"
-                className={`score-input-field ${isLocked ? 'disabled' : ''}`}
-                value={away}
-                onChange={e => setAway(e.target.value.replace(/\D/, ''))}
-                disabled={isLocked}
-              />
-            </>
-          )}
-        </div>
-
-        <div className="team-side away">{match.away}</div>
-      </div>
-
-      {!isLocked && !isFinished && (
-        <div className="mrg-footer">
-          {savedPrediction && (
-            <span className="mrg-prev-prono">
-              Ton prono : {savedPrediction.predicted_home}–{savedPrediction.predicted_away}
-            </span>
-          )}
-          <div className="mrg-actions">
-            <SaveChip status={status} />
-            <button
-              className="mrg-save-btn"
-              onClick={handleSave}
-              disabled={home === '' || away === '' || status === 'saving'}
-            >
-              Sauvegarder
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+.pred-subtitle {
+  font-size: 0.72rem; color: var(--text-3);
+  font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; margin-top: 2px;
 }
 
-function GroupAccordion({ groupKey, teams, ranking, onChange }) {
-  const [open, setOpen] = useState(false);
-
-  const moveUp = (i) => {
-    if (i === 0) return;
-    const next = [...ranking];
-    [next[i - 1], next[i]] = [next[i], next[i - 1]];
-    onChange(groupKey, next);
-  };
-
-  const moveDown = (i) => {
-    if (i === ranking.length - 1) return;
-    const next = [...ranking];
-    [next[i], next[i + 1]] = [next[i + 1], next[i]];
-    onChange(groupKey, next);
-  };
-
-  const rankColors = ['var(--green)', 'var(--accent)', 'var(--warning)', 'var(--danger)'];
-  const rankLabels = ['1er', '2ème', '3ème', '4ème'];
-
-  return (
-    <div className={`group-accordion ${open ? 'open' : ''}`}>
-      <button className="ga-header" onClick={() => setOpen(o => !o)}>
-        <span className="ga-title">Groupe {groupKey}</span>
-        <div className="ga-preview">
-          {teams.slice(0, 2).map((t, i) => (
-            <span key={i} className="ga-team-chip" style={{ borderColor: rankColors[i] }}>
-              {ranking[i] || t}
-            </span>
-          ))}
-          <span className="ga-dots">···</span>
-        </div>
-        <span className="ga-arrow">{open ? '▲' : '▼'}</span>
-      </button>
-
-      {open && (
-        <div className="ga-body">
-          <p className="ga-hint">Glissez ou réordonnez le classement prédit du groupe.</p>
-          {ranking.map((team, i) => (
-            <div key={i} className="ga-row">
-              <span className="ga-pos" style={{ color: rankColors[i], borderColor: rankColors[i] }}>
-                {rankLabels[i]}
-              </span>
-              <select
-                className="ga-select"
-                value={team}
-                onChange={e => {
-                  const next = [...ranking];
-                  next[i] = e.target.value;
-                  onChange(groupKey, next);
-                }}
-              >
-                <option value="">— Choisir —</option>
-                {teams.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-              <div className="ga-arrows">
-                <button onClick={() => moveUp(i)}   disabled={i === 0}>▲</button>
-                <button onClick={() => moveDown(i)} disabled={i === ranking.length - 1}>▼</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+.pred-progress-pill {
+  display: flex; align-items: baseline; gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 50px; padding: 5px 12px;
+  flex-shrink: 0;
 }
 
-function KnockoutRound({ roundKey, matches, onChange }) {
-  return (
-    <div className="ko-round">
-      <div className="ko-round-label">{ROUND_LABELS[roundKey]}</div>
-      {matches.map((match, i) => (
-        <div key={match.id} className="ko-match">
-          <input
-            className="ko-input"
-            placeholder="Équipe 1"
-            value={match.team1}
-            onChange={e => onChange(roundKey, i, 'team1', e.target.value)}
-          />
-          <span className="ko-vs">vs</span>
-          <input
-            className="ko-input"
-            placeholder="Équipe 2"
-            value={match.team2}
-            onChange={e => onChange(roundKey, i, 'team2', e.target.value)}
-          />
-          <select
-            className="ko-select-winner"
-            value={match.winner}
-            onChange={e => onChange(roundKey, i, 'winner', e.target.value)}
-          >
-            <option value="">Vainqueur ?</option>
-            {match.team1 && <option value={match.team1}>{match.team1}</option>}
-            {match.team2 && <option value={match.team2}>{match.team2}</option>}
-          </select>
-        </div>
-      ))}
-    </div>
-  );
+.pp-val   { font-family: 'Rajdhani', sans-serif; font-size: 1.3rem; font-weight: 700; color: var(--green); }
+.pp-sep   { font-size: 0.9rem; color: var(--text-3); margin: 0 1px; }
+.pp-total { font-size: 1rem; font-weight: 700; color: var(--text-2); }
+.pp-label { font-size: 0.65rem; color: var(--text-3); font-weight: 600; margin-left: 3px; letter-spacing: 0.06em; }
+
+/* ── ONGLETS ──────────────────────────────────────────────────────── */
+.pred-tabs {
+  display: flex; gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 50px; padding: 3px;
 }
 
-function AnnexeRow({ catKey, label, placeholder, values, onChange }) {
-  return (
-    <div className="annexe-block card">
-      <div className="annexe-title">{label}</div>
-      {[0, 1, 2].map(i => (
-        <div key={i} className="annexe-row">
-          <span className="annexe-pos">#{i + 1}</span>
-          <input
-            className="score-input annexe-input"
-            placeholder={i === 0 ? placeholder : `${i + 1}ème joueur`}
-            value={values[i] ?? ''}
-            onChange={e => {
-              const next = [...values];
-              next[i] = e.target.value;
-              onChange(catKey, next);
-            }}
-          />
-        </div>
-      ))}
-    </div>
-  );
+.pred-tab-btn {
+  flex: 1; background: none; border: none;
+  color: var(--text-2); padding: 8px 10px;
+  font-size: 0.78rem; font-weight: 700;
+  border-radius: 50px; transition: all 0.15s;
+  white-space: nowrap; cursor: pointer;
+  letter-spacing: 0.02em;
 }
 
-// ══════════════════════════════════════════════════════════════════
-//  COMPOSANT PRINCIPAL
-// ══════════════════════════════════════════════════════════════════
-export default function Predictions() {
-  const { user, session } = useApp();
+.pred-tab-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
 
-  const [activeTab, setActiveTab] = useState('scores');
+/* ── TAB CONTENT ─────────────────────────────────────────────────── */
+.tab-content { display: flex; flex-direction: column; gap: 10px; }
 
-  const [matches,          setMatches]          = useState([]);
-  const [savedPredictions, setSavedPredictions] = useState({});
-  const [loadingMatches,   setLoadingMatches]   = useState(true);
-  const [matchError,       setMatchError]       = useState(null);
+/* ── MATCH ROW CARD (onglet Scores) ──────────────────────────────── */
+.match-row-card {
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(30,48,87,0.45);
+  display: flex; flex-direction: column; gap: 5px;
+}
+.match-row-card:last-child { border-bottom: none; }
+.match-row-card.locked { opacity: 0.6; }
+.match-row-card.finished { background: rgba(255,255,255,0.02); }
 
-  const [groups,        setGroups]        = useState(buildEmptyGroups);
-  const [knockout,      setKnockout]      = useState(buildEmptyKnockout);
-  const [bracketSaving, setBracketSaving] = useState(false);
-  const [bracketStatus, setBracketStatus] = useState(null);
+.mrg-meta {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.65rem; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  flex-wrap: wrap;
+}
 
-  const [annexes,        setAnnexes]        = useState(buildEmptyAnnexes);
-  const [annexesSaving,  setAnnexesSaving]  = useState(false);
-  const [annexesStatus,  setAnnexesStatus]  = useState(null);
+.mrg-group { color: var(--accent); }
+.mrg-date  { color: var(--text-3); }
+.mrg-lock  { color: var(--warning); font-size: 0.6rem; }
+.mrg-pts   { margin-left: auto; font-weight: 800; font-size: 0.72rem; }
 
-  useEffect(() => {
-    setGroups(
-      Object.fromEntries(
-        Object.entries(CDM_GROUPS).map(([g, teams]) => [g, [...teams]])
-      )
-    );
-  }, []);
+.mrg-main {
+  display: grid; grid-template-columns: 1fr auto 1fr;
+  align-items: center; gap: 8px;
+}
 
-  const authHeaders = useCallback(() => ({
-    'Content-Type': 'application/json',
-    ...(session?.access_token
-      ? { Authorization: `Bearer ${session.access_token}` }
-      : {}),
-  }), [session]);
+.team-side {
+  font-size: 0.85rem; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.team-side.home { text-align: right; }
+.team-side.away { text-align: left; }
 
-  // ✅ FIX : tous les fetch utilisent maintenant le préfixe /api
-  useEffect(() => {
-    const load = async () => {
-      setLoadingMatches(true);
-      setMatchError(null);
-      try {
-        const [resMatches, resPronos] = await Promise.all([
-          fetch(`${API_BASE}/api/matches`),
-          user?.id
-            ? fetch(`${API_BASE}/api/predictions/score/${user.id}`, { headers: authHeaders() })
-            : Promise.resolve(null),
-        ]);
+.score-inputs-block {
+  display: flex; align-items: center; gap: 5px;
+  justify-content: center;
+}
 
-        if (!resMatches.ok) throw new Error(`Erreur matchs : ${resMatches.status}`);
-        const matchData = await resMatches.json();
-        setMatches(Array.isArray(matchData) ? matchData : []);
+.score-input-field {
+  width: 38px; height: 38px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text); font-size: 1rem; font-weight: 800;
+  text-align: center; outline: none; padding: 0;
+  transition: border-color 0.15s;
+  -webkit-appearance: none; -moz-appearance: textfield;
+}
+.score-input-field:focus { border-color: var(--accent); }
+.score-input-field::-webkit-inner-spin-button,
+.score-input-field::-webkit-outer-spin-button { -webkit-appearance: none; }
+.score-input-field.disabled { opacity: 0.4; cursor: not-allowed; }
 
-        if (resPronos?.ok) {
-          const pronoData = await resPronos.json();
-          const byMatchId = Object.fromEntries(
-            (Array.isArray(pronoData) ? pronoData : []).map(p => [p.match_id, p])
-          );
-          setSavedPredictions(byMatchId);
-        }
-      } catch (err) {
-        setMatchError(err.message);
-      } finally {
-        setLoadingMatches(false);
-      }
-    };
-    load();
-  }, [user?.id]);
+.score-divider { font-size: 1.1rem; font-weight: 800; color: var(--text-2); }
 
-  const handleSaveScore = useCallback(async (matchId, home, away) => {
-    if (!user?.id) return 'no_user';
-    try {
-      const res = await fetch(`${API_BASE}/api/predictions/score`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify({
-          user_id: String(user.id),
-          match_id: matchId,
-          predicted_home: home,
-          predicted_away: away,
-        }),
-      });
-      if (!res.ok) throw new Error();
-      setSavedPredictions(prev => ({
-        ...prev,
-        [matchId]: { ...prev[matchId], predicted_home: home, predicted_away: away, match_id: matchId },
-      }));
-      return null;
-    } catch {
-      return 'error';
-    }
-  }, [user?.id, authHeaders]);
+.score-result {
+  display: flex; align-items: center; gap: 6px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 1.4rem; font-weight: 700; color: var(--green);
+}
 
-  const handleGroupChange = useCallback((groupKey, newRanking) => {
-    setGroups(prev => ({ ...prev, [groupKey]: newRanking }));
-  }, []);
+.mrg-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 6px; margin-top: 2px;
+}
 
-  const handleKnockoutChange = useCallback((roundKey, matchIdx, field, value) => {
-    setKnockout(prev => {
-      const round = Array.isArray(prev[roundKey]) ? [...prev[roundKey]] : { ...prev[roundKey] };
-      if (Array.isArray(round)) {
-        round[matchIdx] = { ...round[matchIdx], [field]: value };
-      } else {
-        round[field] = value;
-      }
-      return { ...prev, [roundKey]: round };
-    });
-  }, []);
+.mrg-prev-prono {
+  font-size: 0.68rem; color: var(--text-3); font-style: italic;
+}
 
-  const handleFinalChange = useCallback((matchKey, field, value) => {
-    setKnockout(prev => ({
-      ...prev,
-      [matchKey]: { ...prev[matchKey], [field]: value },
-    }));
-  }, []);
+.mrg-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
-  const handleSaveBracket = async () => {
-    if (!user?.id) return;
-    setBracketSaving(true);
-    setBracketStatus(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/predictions/bracket`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify({
-          user_id: String(user.id),
-          bracket_data: { groupes: groups, ...knockout },
-        }),
-      });
-      setBracketStatus(res.ok ? 'saved' : 'error');
-    } catch {
-      setBracketStatus('error');
-    } finally {
-      setBracketSaving(false);
-      setTimeout(() => setBracketStatus(null), 3000);
-    }
-  };
+.mrg-save-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 5px 12px;
+  color: var(--text-2); font-size: 0.75rem; font-weight: 700;
+  cursor: pointer; transition: all 0.15s;
+  white-space: nowrap;
+}
+.mrg-save-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+.mrg-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  const handleAnnexeChange = useCallback((catKey, newValues) => {
-    setAnnexes(prev => ({ ...prev, [catKey]: newValues }));
-  }, []);
+/* ── GROUPES DE MATCHS ───────────────────────────────────────────── */
+.matches-group { display: flex; flex-direction: column; }
 
-  const handleSaveAnnexes = async () => {
-    if (!user?.id) return;
-    setAnnexesSaving(true);
-    setAnnexesStatus(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/predictions/annexes`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify({ user_id: String(user.id), annexes }),
-      });
-      setAnnexesStatus(res.ok ? 'saved' : 'error');
-    } catch {
-      setAnnexesStatus('error');
-    } finally {
-      setAnnexesSaving(false);
-      setTimeout(() => setAnnexesStatus(null), 3000);
-    }
-  };
+.matches-group-title {
+  padding: 8px 14px 5px;
+  font-size: 0.65rem; font-weight: 800;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  background: rgba(56,189,248,0.04);
+}
 
-  const matchesByGroup = matches.reduce((acc, m) => {
-    const g = m.group || 'Autre';
-    if (!acc[g]) acc[g] = [];
-    acc[g].push(m);
-    return acc;
-  }, {});
+/* ── GROUP ACCORDION (onglet Tableau) ────────────────────────────── */
+.group-accordion {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.group-accordion.open { border-color: var(--border-light); }
 
-  const pronosRemplis  = Object.keys(savedPredictions).length;
-  const totalMatchs    = matches.filter(m => !m.is_finished && !m.is_locked).length;
+.ga-header {
+  display: flex; align-items: center;
+  width: 100%; background: none; border: none;
+  padding: 10px 12px; cursor: pointer;
+  gap: 8px; text-align: left;
+}
 
-  return (
-    <div className="predictions-view">
+.ga-title {
+  font-size: 0.88rem; font-weight: 700;
+  color: var(--text); min-width: 70px;
+  letter-spacing: 0.04em;
+}
 
-      <div className="pred-header">
-        <div>
-          <h2>🎯 Pronostics</h2>
-          <p className="pred-subtitle">WC 2026 — Ligue Boulzazen</p>
-        </div>
-        <div className="pred-progress-pill">
-          <span className="pp-val">{pronosRemplis}</span>
-          <span className="pp-sep">/</span>
-          <span className="pp-total">{totalMatchs}</span>
-          <span className="pp-label">matchs</span>
-        </div>
-      </div>
+.ga-preview {
+  display: flex; gap: 4px; align-items: center; flex: 1;
+  flex-wrap: wrap;
+}
 
-      <div className="pred-tabs">
-        {[
-          { key: 'scores',  label: '📊 Scores' },
-          { key: 'bracket', label: '🗺️ Tableau' },
-          { key: 'annexes', label: '🎖️ Annexes' },
-        ].map(tab => (
-          <button
-            key={tab.key}
-            className={`pred-tab-btn ${activeTab === tab.key ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+.ga-team-chip {
+  font-size: 0.65rem; font-weight: 700;
+  border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 6px;
+  color: var(--text-2); white-space: nowrap;
+}
 
-      {activeTab === 'scores' && (
-        <div className="tab-content fade-in">
-          <div className="predictions-card">
-            <div className="predictions-instructions">
-              ✅ Score exact = <strong>+5 pts</strong> · Bonne issue = <strong>+2 pts</strong> · Mauvais pronostic = <strong>0 pt</strong>
-            </div>
+.ga-dots { font-size: 0.7rem; color: var(--text-3); }
 
-            {loadingMatches && (
-              <div className="loading-spinner">Chargement des matchs...</div>
-            )}
+.ga-arrow { color: var(--text-3); font-size: 0.65rem; flex-shrink: 0; }
 
-            {matchError && (
-              <div className="pred-error">
-                ⚠️ {matchError}
-                <br /><span style={{ fontSize: '0.75rem', opacity: 0.7 }}>Vérifiez que le backend est démarré.</span>
-              </div>
-            )}
+.ga-body { padding: 10px 12px; border-top: 1px solid var(--border); }
 
-            {!loadingMatches && !matchError && matches.length === 0 && (
-              <div className="empty-state" style={{ padding: '32px' }}>
-                <div className="empty-state-icon">📭</div>
-                <h4>Aucun match disponible</h4>
-                <p>Les matchs seront ajoutés avant le coup d'envoi de la compétition.</p>
-              </div>
-            )}
+.ga-hint {
+  font-size: 0.72rem; color: var(--text-3); margin-bottom: 8px;
+  font-style: italic;
+}
 
-            {!loadingMatches && Object.entries(matchesByGroup).map(([groupName, groupMatches]) => (
-              <div key={groupName} className="matches-group">
-                <div className="matches-group-title">{groupName}</div>
-                {groupMatches.map(match => (
-                  <MatchRow
-                    key={match.id}
-                    match={match}
-                    savedPrediction={savedPredictions[match.id]}
-                    onSave={handleSaveScore}
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+.ga-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
 
-      {activeTab === 'bracket' && (
-        <div className="tab-content fade-in">
+.ga-pos {
+  width: 40px; text-align: center;
+  font-size: 0.7rem; font-weight: 800;
+  border: 1px solid;
+  border-radius: 4px; padding: 2px 4px;
+  flex-shrink: 0; letter-spacing: 0.04em;
+}
 
-          <div className="bracket-section-title">
-            <span>Phase de Groupes</span>
-            <span className="bst-pts">+5 pts par classement exact</span>
-          </div>
+.ga-select {
+  flex: 1; padding: 7px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-size: 0.8rem; outline: none;
+  transition: border-color 0.15s;
+}
+.ga-select:focus { border-color: var(--accent); }
 
-          <div className="groups-grid">
-            {Object.keys(CDM_GROUPS).map(g => (
-              <GroupAccordion
-                key={g}
-                groupKey={g}
-                teams={CDM_GROUPS[g]}
-                ranking={groups[g] ?? [...CDM_GROUPS[g]]}
-                onChange={handleGroupChange}
-              />
-            ))}
-          </div>
+.ga-arrows { display: flex; flex-direction: column; gap: 2px; }
+.ga-arrows button {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 4px; width: 22px; height: 22px;
+  font-size: 0.6rem; cursor: pointer; color: var(--text-2);
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.1s;
+}
+.ga-arrows button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ga-arrows button:disabled { opacity: 0.3; cursor: not-allowed; }
 
-          <div className="bracket-section-title" style={{ marginTop: 8 }}>
-            <span>Phase Éliminatoire</span>
-            <span className="bst-pts">+5 pts présence · +5 match · +5 vainqueur</span>
-          </div>
+/* ── KNOCKOUT SECTION ────────────────────────────────────────────── */
+.ko-section { display: flex; flex-direction: column; gap: 10px; }
 
-          <div className="ko-section">
-            {KNOCKOUT_ROUNDS.map(r => (
-              <KnockoutRound
-                key={r}
-                roundKey={r}
-                matches={knockout[r]}
-                onChange={handleKnockoutChange}
-              />
-            ))}
+.ko-round {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
 
-            <div className="ko-round">
-              <div className="ko-round-label" style={{ color: 'var(--warning)' }}>🥉 Match 3ème place</div>
-              <div className="ko-match">
-                <input className="ko-input" placeholder="Équipe 1"
-                  value={knockout.troisieme_place?.team1 ?? ''}
-                  onChange={e => handleFinalChange('troisieme_place', 'team1', e.target.value)} />
-                <span className="ko-vs">vs</span>
-                <input className="ko-input" placeholder="Équipe 2"
-                  value={knockout.troisieme_place?.team2 ?? ''}
-                  onChange={e => handleFinalChange('troisieme_place', 'team2', e.target.value)} />
-                <select className="ko-select-winner"
-                  value={knockout.troisieme_place?.winner ?? ''}
-                  onChange={e => handleFinalChange('troisieme_place', 'winner', e.target.value)}>
-                  <option value="">Vainqueur ?</option>
-                  {knockout.troisieme_place?.team1 && <option value={knockout.troisieme_place.team1}>{knockout.troisieme_place.team1}</option>}
-                  {knockout.troisieme_place?.team2 && <option value={knockout.troisieme_place.team2}>{knockout.troisieme_place.team2}</option>}
-                </select>
-              </div>
-            </div>
+.ko-round-label {
+  font-size: 0.7rem; font-weight: 800;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent); margin-bottom: 4px;
+}
 
-            <div className="ko-round">
-              <div className="ko-round-label" style={{ color: 'var(--gold)' }}>🏆 FINALE</div>
-              <div className="ko-match finale-match">
-                <input className="ko-input" placeholder="Finaliste 1"
-                  value={knockout.finale?.team1 ?? ''}
-                  onChange={e => handleFinalChange('finale', 'team1', e.target.value)} />
-                <span className="ko-vs">⚽</span>
-                <input className="ko-input" placeholder="Finaliste 2"
-                  value={knockout.finale?.team2 ?? ''}
-                  onChange={e => handleFinalChange('finale', 'team2', e.target.value)} />
-                <select className="ko-select-winner"
-                  value={knockout.finale?.winner ?? ''}
-                  onChange={e => handleFinalChange('finale', 'winner', e.target.value)}>
-                  <option value="">Champion du Monde ?</option>
-                  {knockout.finale?.team1 && <option value={knockout.finale.team1}>{knockout.finale.team1}</option>}
-                  {knockout.finale?.team2 && <option value={knockout.finale.team2}>{knockout.finale.team2}</option>}
-                </select>
-              </div>
-            </div>
-          </div>
+.ko-match {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+}
 
-          <div className="pred-save-bar">
-            <SaveChip status={bracketStatus} />
-            <button
-              className="btn-save-predictions"
-              onClick={handleSaveBracket}
-              disabled={bracketSaving}
-            >
-              {bracketSaving ? '⏳ Sauvegarde...' : '💾 Sauvegarder le tableau'}
-            </button>
-          </div>
-        </div>
-      )}
+.ko-match.finale-match { background: rgba(255,215,0,0.04); padding: 6px; border-radius: 8px; }
 
-      {activeTab === 'annexes' && (
-        <div className="tab-content fade-in">
-          <div className="predictions-card" style={{ padding: '12px 14px 4px' }}>
-            <p className="predictions-instructions">
-              Pronostiquez les <strong>Top 3</strong> de chaque catégorie avant le coup d'envoi.
-              Bonne place exacte = <strong>+5 pts</strong> · Dans le Top 3 = <strong>+2 pts</strong>
-            </p>
-          </div>
+.ko-input {
+  flex: 1; min-width: 80px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 8px;
+  color: var(--text); font-size: 0.8rem; outline: none;
+  transition: border-color 0.15s;
+}
+.ko-input:focus { border-color: var(--accent); }
+.ko-input::placeholder { color: var(--text-3); font-size: 0.72rem; }
 
-          {ANNEXE_CATEGORIES.map(cat => (
-            <AnnexeRow
-              key={cat.key}
-              catKey={cat.key}
-              label={cat.label}
-              placeholder={cat.placeholder}
-              values={annexes[cat.key]}
-              onChange={handleAnnexeChange}
-            />
-          ))}
+.ko-vs { color: var(--text-3); font-size: 0.75rem; font-weight: 700; flex-shrink: 0; }
 
-          <div className="pred-save-bar">
-            <SaveChip status={annexesStatus} />
-            <button
-              className="btn-save-predictions"
-              onClick={handleSaveAnnexes}
-              disabled={annexesSaving}
-            >
-              {annexesSaving ? '⏳ Sauvegarde...' : '💾 Sauvegarder les prédictions'}
-            </button>
-          </div>
-        </div>
-      )}
+.ko-select-winner {
+  flex: 1; min-width: 100px;
+  background: var(--surface-2); border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 7px 8px;
+  color: var(--green); font-size: 0.8rem; font-weight: 700;
+  outline: none; transition: border-color 0.15s;
+}
+.ko-select-winner:focus { border-color: var(--green); }
 
-    </div>
-  );
+/* ── SECTION TITLE BRACKET ───────────────────────────────────────── */
+.bracket-section-title {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 0;
+}
+
+.bracket-section-title span:first-child {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 1.05rem; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+
+.bst-pts {
+  font-size: 0.65rem; font-weight: 700;
+  color: var(--accent); letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ── GROUPS GRID ──────────────────────────────────────────────────── */
+.groups-grid {
+  display: flex; flex-direction: column; gap: 6px;
+}
+
+/* ── ANNEXES ──────────────────────────────────────────────────────── */
+.annexe-block {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px;
+}
+
+.annexe-title {
+  font-size: 0.88rem; font-weight: 700;
+  color: var(--text); margin-bottom: 4px;
+  letter-spacing: 0.04em;
+}
+
+.annexe-row {
+  display: flex; align-items: center; gap: 10px;
+}
+
+.annexe-pos {
+  width: 28px; text-align: center;
+  font-size: 0.78rem; font-weight: 800;
+  color: var(--gold); flex-shrink: 0;
+}
+
+.annexe-input {
+  flex: 1; padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-size: 0.85rem; outline: none;
+  transition: border-color 0.15s;
+}
+.annexe-input:focus { border-color: var(--accent); }
+.annexe-input::placeholder { color: var(--text-3); font-size: 0.75rem; }
+
+/* ── SAVE BAR ─────────────────────────────────────────────────────── */
+.pred-save-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 4px;
+}
+
+.save-chip {
+  font-size: 0.78rem; font-weight: 700;
+  min-width: 90px; text-align: right;
+  flex-shrink: 0;
+  transition: color 0.3s ease;
+}
+
+/* ── ERREUR ───────────────────────────────────────────────────────── */
+.pred-error {
+  background: rgba(244,63,94,0.08);
+  border: 1px solid rgba(244,63,94,0.25);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 0.82rem; color: var(--danger);
+  line-height: 1.5;
+}
+
+/* ── SYNC INDICATOR (header) ─────────────────────────────────────── */
+.sync-indicator {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--sync-color, transparent);
+  flex-shrink: 0;
+}
+
+.sync-indicator.sync-pulse {
+  animation: syncBlink 1s ease-in-out infinite;
+}
+
+.sync-indicator.sync-ok {
+  box-shadow: 0 0 6px var(--sync-color);
+}
+
+.sync-indicator.sync-degraded {
+  animation: syncBlink 2s ease-in-out infinite;
+}
+
+.sync-indicator.sync-offline { opacity: 0.7; }
+
+@keyframes syncBlink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
 }

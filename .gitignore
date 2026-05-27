@@ -19,3 +19,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Secrets (JAMAIS committer ces fichiers)
+*.env
+!*.env.example
