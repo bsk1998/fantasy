@@ -1,33 +1,83 @@
+/**
+ * App.jsx — Application principale Fantasy Boulzazen WC 2026
+ * ─────────────────────────────────────────────────────────────
+ * Modifications v5 :
+ *  - Intégration de l'utilitaire getDisplayName (username.js)
+ *  - Cache local (localStorage) : user + leaderboard persistés
+ *    → Chargement immédiat en mode dégradé si le backend est hors ligne
+ *  - État de synchronisation visuel transmis via le Context global
+ *    (syncStatus : 'idle' | 'syncing' | 'ok' | 'degraded' | 'offline')
+ *  - Fallback gracieux : l'app reste utilisable même sans backend
+ */
+
 import { useState, useEffect, createContext, useContext } from 'react';
 import { supabase } from './supabaseClient';
 import { API_BASE, ADMIN_EMAILS } from './config';
-import Dashboard from './views/Dashboard';
-import MyTeam from './views/MyTeam';
-import Predictions from './views/Predictions';
-import Leaderboard from './views/Leaderboard';
-import Complaints from './views/Complaints';
-import AdminPanel from './views/AdminPanel';
+import { getDisplayNameFromMeta, getDisplayName } from './utils/username';
+import Dashboard    from './views/Dashboard';
+import MyTeam       from './views/MyTeam';
+import Predictions  from './views/Predictions';
+import Leaderboard  from './views/Leaderboard';
+import Complaints   from './views/Complaints';
+import AdminPanel   from './views/AdminPanel';
 
-// ─── Context global ────────────────────────────────────────────────────────
+// ─── Clés du cache localStorage ───────────────────────────────
+const CACHE_USER_KEY        = 'boulzazen_cache_user';
+const CACHE_LEADERBOARD_KEY = 'boulzazen_cache_leaderboard';
+const CACHE_TTL_MS          = 1000 * 60 * 30; // 30 minutes
+
+// ─── Context global ────────────────────────────────────────────
 export const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 
-// ─── Helper : appel API avec préfixe /api ──────────────────────────────────
-// En dev  → fetch("/api/leaderboard")  → proxy Vite → localhost:8000/leaderboard
-// En prod → fetch("https://monapi.com/api/leaderboard") (VITE_API_BASE inclut le domaine)
+// ─── Helper fetch API ──────────────────────────────────────────
 export const apiFetch = (path, options = {}) =>
   fetch(`${API_BASE}/api${path}`, options);
 
-// ─── Navigation ────────────────────────────────────────────────────────────
+// ─── Navigation ────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { id: 'dashboard',   icon: 'HOME',      label: 'Accueil'    },
-  { id: 'myteam',      icon: 'PITCH',     label: 'Équipe'     },
-  { id: 'predictions', icon: 'TARGET',    label: 'Pronos'     },
-  { id: 'leaderboard', icon: 'TROPHY',    label: 'Classement' },
-  { id: 'complaints',  icon: 'FLAG',      label: 'Plaintes'   },
+  { id: 'dashboard',   icon: 'HOME',   label: 'Accueil'    },
+  { id: 'myteam',      icon: 'PITCH',  label: 'Équipe'     },
+  { id: 'predictions', icon: 'TARGET', label: 'Pronos'     },
+  { id: 'leaderboard', icon: 'TROPHY', label: 'Classement' },
+  { id: 'complaints',  icon: 'FLAG',   label: 'Plaintes'   },
 ];
 
-// ─── Icônes SVG inline ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  CACHE HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+/** Sauvegarde une valeur dans le cache avec timestamp. */
+function cacheSet(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), value }));
+  } catch (e) {
+    // Quota dépassé ou mode privé — on ignore silencieusement
+  }
+}
+
+/** Lit le cache. Retourne null si absent ou expiré. */
+function cacheGet(key, ttlMs = CACHE_TTL_MS) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const { ts, value } = JSON.parse(raw);
+    if (Date.now() - ts > ttlMs) return null; // expiré
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/** Supprime une entrée du cache. */
+function cacheDel(key) {
+  try { localStorage.removeItem(key); } catch { /* silencieux */ }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ICÔNES SVG INLINE
+// ═══════════════════════════════════════════════════════════════
+
 export const Icon = ({ name, size = 22 }) => {
   const icons = {
     HOME: (
@@ -107,13 +157,29 @@ export const Icon = ({ name, size = 22 }) => {
         <polyline points="22,6 12,13 2,6"/>
       </svg>
     ),
+    WIFI_OFF: (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <line x1="1" y1="1" x2="23" y2="23"/>
+        <path d="M16.72 11.06A10.94 10.94 0 0119 12.55"/>
+        <path d="M5 12.55a10.94 10.94 0 015.17-2.39"/>
+        <path d="M10.71 5.05A16 16 0 0122.56 9"/>
+        <path d="M1.42 9a15.91 15.91 0 014.7-2.88"/>
+        <path d="M8.53 16.11a6 6 0 016.95 0"/>
+        <circle cx="12" cy="20" r="1" fill="currentColor"/>
+      </svg>
+    ),
+    CHECK: (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+        <polyline points="20,6 9,17 4,12"/>
+      </svg>
+    ),
   };
   return icons[name] ?? null;
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  GESTION DES HASH D'ERREUR SUPABASE DANS L'URL
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+//  HASH ERROR SUPABASE
+// ═══════════════════════════════════════════════════════════════
 
 function parseHashError() {
   if (typeof window === 'undefined') return null;
@@ -139,9 +205,9 @@ const HASH_ERROR_MESSAGES = {
   email_not_confirmed: '📧 Confirme ton email avant de te connecter.',
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  SPLASH SCREEN
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 
 function SplashScreen() {
   return (
@@ -165,9 +231,9 @@ function SplashScreen() {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  LOGIN / REGISTER SCREEN
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+//  AUTH SCREEN
+// ═══════════════════════════════════════════════════════════════
 
 function AuthScreen({ onSuccess, initialError }) {
   const [mode,         setMode]         = useState('login');
@@ -179,9 +245,7 @@ function AuthScreen({ onSuccess, initialError }) {
   const [error,        setError]        = useState(initialError || null);
   const [success,      setSuccess]      = useState(null);
 
-  useEffect(() => {
-    if (initialError) setError(initialError);
-  }, [initialError]);
+  useEffect(() => { if (initialError) setError(initialError); }, [initialError]);
 
   const validateForm = () => {
     if (!email.trim() || !email.includes('@')) return 'Adresse email invalide.';
@@ -193,46 +257,33 @@ function AuthScreen({ onSuccess, initialError }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError(null);
-    setSuccess(null);
-
-    const validationError = validateForm();
-    if (validationError) { setError(validationError); return; }
-
+    setError(null); setSuccess(null);
+    const ve = validateForm();
+    if (ve) { setError(ve); return; }
     setLoading(true);
     try {
       if (mode === 'login') {
         const { data, error: authError } = await supabase.auth.signInWithPassword({
-          email:    email.trim().toLowerCase(),
-          password: password,
+          email: email.trim().toLowerCase(), password,
         });
-
         if (authError) {
-          const errorMap = {
+          const map = {
             'Invalid login credentials': 'Email ou mot de passe incorrect.',
             'Email not confirmed':       'Confirme ton email avant de te connecter.',
             'Too many requests':         'Trop de tentatives. Attends quelques minutes.',
           };
-          throw new Error(errorMap[authError.message] || authError.message);
+          throw new Error(map[authError.message] || authError.message);
         }
         if (data?.session) onSuccess(data.session);
-
       } else {
         const { data, error: authError } = await supabase.auth.signUp({
-          email:    email.trim().toLowerCase(),
-          password: password,
-          options: {
-            data: { username: username.trim(), full_name: username.trim() },
-          },
+          email: email.trim().toLowerCase(), password,
+          options: { data: { username: username.trim(), full_name: username.trim() } },
         });
-
         if (authError) {
-          const errorMap = {
-            'User already registered': 'Cet email est déjà utilisé. Connecte-toi.',
-          };
-          throw new Error(errorMap[authError.message] || authError.message);
+          const map = { 'User already registered': 'Cet email est déjà utilisé. Connecte-toi.' };
+          throw new Error(map[authError.message] || authError.message);
         }
-
         if (data?.user && !data?.session) {
           setSuccess('✅ Compte créé ! Vérifie ta boîte mail pour confirmer.');
           setMode('login');
@@ -241,7 +292,7 @@ function AuthScreen({ onSuccess, initialError }) {
         }
       }
     } catch (err) {
-      setError(err.message || 'Une erreur est survenue. Réessaie.');
+      setError(err.message || 'Une erreur est survenue.');
     } finally {
       setLoading(false);
     }
@@ -263,18 +314,12 @@ function AuthScreen({ onSuccess, initialError }) {
 
         <div className="login-card">
           <div className="auth-mode-toggle">
-            <button
-              className={`auth-mode-btn ${mode === 'login' ? 'active' : ''}`}
-              onClick={() => { setMode('login'); setError(null); setSuccess(null); }}
-              type="button"
-            >
+            <button className={`auth-mode-btn ${mode === 'login' ? 'active' : ''}`}
+              onClick={() => { setMode('login'); setError(null); setSuccess(null); }} type="button">
               Connexion
             </button>
-            <button
-              className={`auth-mode-btn ${mode === 'register' ? 'active' : ''}`}
-              onClick={() => { setMode('register'); setError(null); setSuccess(null); }}
-              type="button"
-            >
+            <button className={`auth-mode-btn ${mode === 'register' ? 'active' : ''}`}
+              onClick={() => { setMode('register'); setError(null); setSuccess(null); }} type="button">
               Inscription
             </button>
           </div>
@@ -286,89 +331,52 @@ function AuthScreen({ onSuccess, initialError }) {
             {mode === 'register' && (
               <div className="auth-field">
                 <label className="auth-label"><Icon name="USER" size={14} /> Pseudo</label>
-                <input
-                  type="text"
-                  className="auth-input"
-                  placeholder="Ton pseudo dans la ligue"
-                  value={username}
-                  onChange={e => setUsername(e.target.value)}
-                  maxLength={24}
-                  autoComplete="username"
-                  required
-                />
+                <input type="text" className="auth-input" placeholder="Ton pseudo dans la ligue"
+                  value={username} onChange={e => setUsername(e.target.value)}
+                  maxLength={24} autoComplete="username" required />
               </div>
             )}
-
             <div className="auth-field">
               <label className="auth-label"><Icon name="MAIL" size={14} /> Email</label>
-              <input
-                type="email"
-                className="auth-input"
-                placeholder="ton@email.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                autoComplete="email"
-                inputMode="email"
-                required
-              />
+              <input type="email" className="auth-input" placeholder="ton@email.com"
+                value={email} onChange={e => setEmail(e.target.value)}
+                autoComplete="email" inputMode="email" required />
             </div>
-
             <div className="auth-field">
               <label className="auth-label"><Icon name="LOCK" size={14} /> Mot de passe</label>
               <div className="auth-input-wrap">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  className="auth-input"
+                <input type={showPassword ? 'text' : 'password'} className="auth-input"
                   placeholder={mode === 'register' ? 'Min. 6 caractères' : '••••••••'}
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  required
-                />
-                <button
-                  type="button"
-                  className="auth-eye-btn"
-                  onClick={() => setShowPassword(s => !s)}
-                >
+                  value={password} onChange={e => setPassword(e.target.value)}
+                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required />
+                <button type="button" className="auth-eye-btn" onClick={() => setShowPassword(s => !s)}>
                   <Icon name={showPassword ? 'EYE_OFF' : 'EYE'} size={16} />
                 </button>
               </div>
             </div>
-
-            <button
-              type="submit"
-              className={`auth-submit-btn ${loading ? 'loading' : ''}`}
-              disabled={loading}
-            >
-              {loading
-                ? <span className="btn-spinner" />
+            <button type="submit" className={`auth-submit-btn ${loading ? 'loading' : ''}`} disabled={loading}>
+              {loading ? <span className="btn-spinner" />
                 : mode === 'login' ? '🚀 Se connecter' : '⚽ Créer mon compte'}
             </button>
           </form>
 
           {mode === 'login' && (
-            <button
-              type="button"
-              className="auth-forgot-btn"
-              onClick={async () => {
-                if (!email.trim()) { setError('Entre ton email ci-dessus.'); return; }
-                setLoading(true);
-                const { error: resetError } = await supabase.auth.resetPasswordForEmail(
-                  email.trim().toLowerCase(),
-                  { redirectTo: `${window.location.origin}/reset-password` }
-                );
-                setLoading(false);
-                if (resetError) setError("Erreur lors de l'envoi.");
-                else setSuccess('📧 Email de réinitialisation envoyé !');
-              }}
-            >
+            <button type="button" className="auth-forgot-btn" onClick={async () => {
+              if (!email.trim()) { setError('Entre ton email ci-dessus.'); return; }
+              setLoading(true);
+              const { error: e } = await supabase.auth.resetPasswordForEmail(
+                email.trim().toLowerCase(),
+                { redirectTo: `${window.location.origin}/reset-password` }
+              );
+              setLoading(false);
+              if (e) setError("Erreur lors de l'envoi.");
+              else setSuccess('📧 Email de réinitialisation envoyé !');
+            }}>
               Mot de passe oublié ?
             </button>
           )}
-
           <p className="login-hint">
-            {mode === 'login'
-              ? 'Accès réservé aux membres de la ligue'
+            {mode === 'login' ? 'Accès réservé aux membres de la ligue'
               : 'Inscription libre — rejoins la ligue Boulzazen'}
           </p>
         </div>
@@ -377,9 +385,9 @@ function AuthScreen({ onSuccess, initialError }) {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  SYNC SCREEN
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 
 function SyncScreen() {
   const steps = [
@@ -389,12 +397,10 @@ function SyncScreen() {
     '🏆 Mise à jour du classement...',
   ];
   const [step, setStep] = useState(0);
-
   useEffect(() => {
     const iv = setInterval(() => setStep(s => (s + 1) % steps.length), 700);
     return () => clearInterval(iv);
   }, []);
-
   return (
     <div className="sync-screen">
       <div className="sync-content">
@@ -409,16 +415,45 @@ function SyncScreen() {
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  HELPER : construire un user de fallback depuis la session Supabase
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+//  INDICATEUR DE SYNC (petit voyant en header)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Affiche un indicateur visuel discret de l'état de synchronisation.
+ * syncStatus : 'idle' | 'syncing' | 'ok' | 'degraded' | 'offline'
+ */
+function SyncIndicator({ syncStatus }) {
+  if (!syncStatus || syncStatus === 'idle') return null;
+
+  const cfg = {
+    syncing:  { cls: 'sync-pulse',    title: 'Synchronisation en cours...',  color: 'var(--accent)' },
+    ok:       { cls: 'sync-ok',       title: 'Données à jour',               color: 'var(--green)'  },
+    degraded: { cls: 'sync-degraded', title: 'Mode dégradé (backend lent)',   color: 'var(--warning)'},
+    offline:  { cls: 'sync-offline',  title: 'Hors ligne — données en cache', color: 'var(--danger)' },
+  }[syncStatus] ?? { cls: '', title: '', color: 'transparent' };
+
+  return (
+    <span
+      className={`sync-indicator ${cfg.cls}`}
+      title={cfg.title}
+      aria-label={cfg.title}
+      style={{ '--sync-color': cfg.color }}
+    />
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HELPER FALLBACK USER
+// ═══════════════════════════════════════════════════════════════
 
 function buildFallbackUser(session) {
-  const meta = session?.user?.user_metadata || {};
+  const meta  = session?.user?.user_metadata || {};
+  const email = session?.user?.email || '';
   return {
-    username: meta.username || meta.full_name?.split(' ')[0] || session?.user?.email?.split('@')[0] || 'Joueur',
-    email:    session?.user?.email || '',
-    id:       session?.user?.id || null,
+    username:            getDisplayNameFromMeta(meta, email),
+    email,
+    id:                  session?.user?.id || null,
     score_fantasy:       0,
     score_pronos_scores: 0,
     score_bracket:       0,
@@ -427,31 +462,30 @@ function buildFallbackUser(session) {
   };
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  APP PRINCIPALE
-// ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [session,   setSession]   = useState(null);
-  const [user,      setUser]      = useState(null);
-  const [screen,    setScreen]    = useState('splash'); // 'splash' | 'login' | 'syncing' | 'app'
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [syncData,  setSyncData]  = useState(null);
-  const [hashError, setHashError] = useState(null);
+  const [session,    setSession]    = useState(null);
+  const [user,       setUser]       = useState(null);
+  const [screen,     setScreen]     = useState('splash');
+  const [activeTab,  setActiveTab]  = useState('dashboard');
+  const [syncData,   setSyncData]   = useState(null);
+  const [syncStatus, setSyncStatus] = useState('idle');
+  const [hashError,  setHashError]  = useState(null);
 
-  // ── Vérification du hash d'erreur Supabase au chargement ─────────────────
+  // ── Hash error Supabase ─────────────────────────────────────
   useEffect(() => {
     const err = parseHashError();
     if (err) {
       clearHashFromURL();
-      const msg = HASH_ERROR_MESSAGES[err.errorCode]
-               || err.errorDesc
-               || `Erreur d'authentification : ${err.error}`;
+      const msg = HASH_ERROR_MESSAGES[err.errorCode] || err.errorDesc || `Erreur : ${err.error}`;
       setHashError(msg);
     }
   }, []);
 
-  // ── Auth listener ─────────────────────────────────────────────────────────
+  // ── Auth listener ───────────────────────────────────────────
   useEffect(() => {
     let splashTimer;
 
@@ -460,6 +494,11 @@ export default function App() {
         setSession(s);
         triggerSync(s);
       } else {
+        // Tente de charger le cache même sans session (lecture seule)
+        const cachedUser = cacheGet(CACHE_USER_KEY);
+        if (cachedUser) {
+          devLog('📦 Utilisateur chargé depuis le cache (sans session)');
+        }
         splashTimer = setTimeout(() => setScreen('login'), 1800);
       }
     });
@@ -471,9 +510,11 @@ export default function App() {
           setSession(s);
           await triggerSync(s);
         } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setSyncData(null);
-          setSession(null);
+          // Nettoie le cache au logout pour éviter la fuite de données
+          cacheDel(CACHE_USER_KEY);
+          cacheDel(CACHE_LEADERBOARD_KEY);
+          setUser(null); setSyncData(null); setSession(null);
+          setSyncStatus('idle');
           setScreen('login');
         } else if (event === 'TOKEN_REFRESHED' && s) {
           setSession(s);
@@ -484,34 +525,35 @@ export default function App() {
       }
     );
 
-    return () => {
-      clearTimeout(splashTimer);
-      subscription.unsubscribe();
-    };
+    return () => { clearTimeout(splashTimer); subscription.unsubscribe(); };
   }, []);
 
-  // ── Sync au login ─────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════
+  //  SYNC PRINCIPAL
+  // ═══════════════════════════════════════════════════════════
+
   const triggerSync = async (s) => {
     setScreen('syncing');
+    setSyncStatus('syncing');
 
-    const username =
-      s.user?.user_metadata?.username
-      || s.user?.user_metadata?.full_name?.split(' ')[0]
-      || s.user?.email?.split('@')[0]
-      || 'Joueur';
+    // ── Nom d'affichage depuis les metadata Supabase ───────────
+    const meta     = s.user?.user_metadata || {};
+    const email    = s.user?.email || '';
+    const username = getDisplayNameFromMeta(meta, email);
+
+    // ── Tentative de chargement du cache AVANT l'appel réseau ──
+    // → L'app est utilisable immédiatement si le backend répond lentement
+    const cachedUser = cacheGet(CACHE_USER_KEY);
+    if (cachedUser) {
+      devLog('📦 Données utilisateur chargées depuis le cache (affichage immédiat)');
+      setUser(cachedUser);
+    }
 
     try {
-      // ────────────────────────────────────────────────────────────────────
-      // IMPORTANT : en dev, API_BASE = "" donc l'URL devient /api/auth/sync
-      // Le proxy Vite retire /api → appelle http://localhost:8000/auth/sync
-      // En prod, API_BASE = "https://ton-backend.onrender.com" (sans /api)
-      // ────────────────────────────────────────────────────────────────────
-      const endpoint = `${API_BASE}/api/auth/sync`;
-
       const controller = new AbortController();
-      const timeoutId  = setTimeout(() => controller.abort(), 12000); // 12s
+      const timeoutId  = setTimeout(() => controller.abort(), 12000);
 
-      const res = await fetch(endpoint, {
+      const res = await fetch(`${API_BASE}/api/auth/sync`, {
         method:  'POST',
         headers: {
           'Content-Type':  'application/json',
@@ -519,8 +561,8 @@ export default function App() {
         },
         body: JSON.stringify({
           user_id:  s.user.id,
-          email:    s.user.email,
-          username: username,
+          email,
+          username,
         }),
         signal: controller.signal,
       });
@@ -530,76 +572,94 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
 
-        // Le backend peut retourner status "synced" ou "degraded", les deux sont OK
         if (data?.user) {
-          setUser(data.user);
+          // ── Nettoyage du nom via l'utilitaire ────────────────
+          const cleanedUser = {
+            ...data.user,
+            username: getDisplayName(data.user),
+          };
+
+          setUser(cleanedUser);
           setSyncData(data.sync_info);
-          logger(`✅ Sync OK — mode: ${data.status}, user: ${data.user.username}`);
+
+          // ── Mise en cache pour le mode hors-ligne ────────────
+          cacheSet(CACHE_USER_KEY, cleanedUser);
+
+          setSyncStatus(data.status === 'degraded' ? 'degraded' : 'ok');
+          devLog(`✅ Sync OK — mode: ${data.status}, user: ${cleanedUser.username}`);
         } else {
           // Réponse inattendue mais pas d'erreur HTTP
-          setUser(buildFallbackUser(s));
-          logger('⚠️ Sync: réponse sans user, fallback local');
+          const fb = buildFallbackUser(s);
+          setUser(fb);
+          cacheSet(CACHE_USER_KEY, fb);
+          setSyncStatus('degraded');
+          devLog('⚠️ Sync: réponse sans user, fallback');
         }
       } else {
-        // Erreur HTTP (4xx, 5xx)
-        let errorDetail = '';
-        try {
-          const errBody = await res.text();
-          errorDetail = errBody.slice(0, 200);
-        } catch (_) {}
-        logger(`⚠️ Sync API ${res.status}: ${errorDetail}`);
-        setUser(buildFallbackUser(s));
+        // Erreur HTTP — on utilise le cache s'il existe, sinon fallback
+        devLog(`⚠️ Sync API ${res.status}`);
+        if (!cachedUser) {
+          const fb = buildFallbackUser(s);
+          setUser(fb);
+          cacheSet(CACHE_USER_KEY, fb);
+        }
+        setSyncStatus('degraded');
       }
 
     } catch (err) {
-      if (err.name === 'AbortError') {
-        logger('⚠️ Sync timeout (12s), mode dégradé');
-      } else {
-        logger(`⚠️ Sync erreur réseau: ${err.message}`);
+      const isTimeout = err.name === 'AbortError';
+      devLog(isTimeout ? '⚠️ Sync timeout (12s)' : `⚠️ Sync réseau: ${err.message}`);
+
+      // ── Mode hors-ligne : on charge le cache ─────────────────
+      if (!cachedUser) {
+        const fb = buildFallbackUser(s);
+        setUser(fb);
+        cacheSet(CACHE_USER_KEY, fb);
       }
-      // Fallback gracieux — l'app reste utilisable même sans backend
-      setUser(buildFallbackUser(s));
+      setSyncStatus('offline');
     } finally {
       setScreen('app');
     }
   };
 
-  const handleAuthSuccess = (s) => {
-    setSession(s);
-    triggerSync(s);
-  };
+  const handleAuthSuccess = (s) => { setSession(s); triggerSync(s); };
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    setUser(null);
-    setSyncData(null);
-    setSession(null);
+    cacheDel(CACHE_USER_KEY);
+    cacheDel(CACHE_LEADERBOARD_KEY);
+    setUser(null); setSyncData(null); setSession(null);
+    setSyncStatus('idle');
     setScreen('login');
   };
 
-  // ── Vérifier si l'utilisateur est admin ───────────────────────────────────
-  const isAdmin = session?.user?.email
-    ? ADMIN_EMAILS.includes(session.user.email)
-    : false;
+  const isAdmin = ADMIN_EMAILS.includes(session?.user?.email || '');
 
-  // ── Context ───────────────────────────────────────────────────────────────
+  // ── Nom affiché (toujours propre) ────────────────────────────
+  const displayName = user ? getDisplayName(user) : '—';
+
+  // ── Context ─────────────────────────────────────────────────
   const ctx = {
     user,
     setUser,
     session,
     syncData,
+    syncStatus,
     handleLogout,
     API_BASE,
     apiFetch,
     isAdmin,
+    // Expose les helpers cache pour les vues enfants (ex: Dashboard)
+    cacheSet,
+    cacheGet,
+    CACHE_LEADERBOARD_KEY,
   };
 
-  // ── Navigation items (+ Admin si applicable) ──────────────────────────────
   const navItems = isAdmin
     ? [...NAV_ITEMS, { id: 'admin', icon: 'ADMIN', label: 'Admin' }]
     : NAV_ITEMS;
 
-  // ── Routing ───────────────────────────────────────────────────────────────
+  // ── Routing ──────────────────────────────────────────────────
   if (screen === 'splash')  return <SplashScreen />;
   if (screen === 'login')   return <AuthScreen onSuccess={handleAuthSuccess} initialError={hashError} />;
   if (screen === 'syncing') return <SyncScreen />;
@@ -608,7 +668,7 @@ export default function App() {
     <AppContext.Provider value={ctx}>
       <div className="app-shell">
 
-        {/* ── HEADER ──────────────────────────────────────────────────────── */}
+        {/* ── HEADER ──────────────────────────────────────────── */}
         <header className="app-header">
           <div className="header-brand">
             <span className="header-ball">⚽</span>
@@ -617,13 +677,19 @@ export default function App() {
               <div className="header-subtitle">WC 2026</div>
             </div>
           </div>
-          <button className="header-user-pill" onClick={handleLogout} title="Se déconnecter">
-            <span className="pill-name">{user?.username ?? '—'}</span>
-            <span className="pill-score">{(user?.total ?? 0).toLocaleString()} pts</span>
-          </button>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* Indicateur de synchronisation visuel */}
+            <SyncIndicator syncStatus={syncStatus} />
+
+            <button className="header-user-pill" onClick={handleLogout} title="Se déconnecter">
+              <span className="pill-name">{displayName}</span>
+              <span className="pill-score">{(user?.total ?? 0).toLocaleString()} pts</span>
+            </button>
+          </div>
         </header>
 
-        {/* ── VUE ACTIVE ──────────────────────────────────────────────────── */}
+        {/* ── VUE ACTIVE ──────────────────────────────────────── */}
         <main className="app-content">
           {activeTab === 'dashboard'   && <Dashboard />}
           {activeTab === 'myteam'      && <MyTeam />}
@@ -633,7 +699,7 @@ export default function App() {
           {activeTab === 'admin'       && isAdmin && <AdminPanel />}
         </main>
 
-        {/* ── BOTTOM NAV ──────────────────────────────────────────────────── */}
+        {/* ── BOTTOM NAV ──────────────────────────────────────── */}
         <nav className="bottom-nav">
           {navItems.map(item => (
             <button
@@ -655,9 +721,7 @@ export default function App() {
   );
 }
 
-// ── Mini logger silencieux en prod ────────────────────────────────────────────
-function logger(msg) {
-  if (import.meta.env.DEV) {
-    console.log(`[App] ${msg}`);
-  }
+// ── Logger silencieux en prod ──────────────────────────────────
+function devLog(msg) {
+  if (import.meta.env.DEV) console.log(`[App] ${msg}`);
 }

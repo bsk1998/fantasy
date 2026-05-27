@@ -1,0 +1,161 @@
+"""
+main_lifespan_patch.py — Patch pour intégrer updater.py dans main.py
+
+INSTRUCTIONS D'INTÉGRATION :
+  1. Ajouter les imports ci-dessous au début de main.py
+  2. Remplacer la ligne `app = FastAPI(...)` par la version avec lifespan
+  3. Optionnel : ajouter la route /sync-status
+
+Ce fichier n'est PAS exécuté directement — c'est une référence de code à copier.
+
+FIX MULTIPROCESSING WINDOWS (Python 3.12+) :
+  Le bug __firstlineno__ survient lors de l'utilisation de multiprocessing
+  avec SQLAlchemy sous Windows. La solution est de forcer le mode 'spawn'
+  et d'utiliser uniquement des processeurs async/await sans fork.
+  APScheduler avec AsyncIOScheduler (asyncio) évite ce problème.
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLOC 1 — IMPORTS À AJOUTER EN TÊTE DE main.py (après les imports existants)
+# ══════════════════════════════════════════════════════════════════════════════
+
+IMPORTS_A_AJOUTER = """
+from contextlib import asynccontextmanager
+
+# Fix multiprocessing Windows Python 3.12+ : forcer le mode spawn
+import multiprocessing
+if multiprocessing.get_start_method(allow_none=True) is None:
+    try:
+        multiprocessing.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass  # Déjà initialisé — ignorer
+
+try:
+    from app.updater import startup_handler, shutdown_handler, get_stats_sync
+    UPDATER_AVAILABLE = True
+except ImportError:
+    UPDATER_AVAILABLE = False
+    logger.warning("updater.py non disponible — tâche de fond désactivée")
+    async def startup_handler(): pass
+    async def shutdown_handler(): pass
+    def get_stats_sync(): return {"scheduler_actif": False}
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLOC 2 — REMPLACEMENT DE `app = FastAPI(...)` DANS main.py
+#  Remplacer l'instanciation actuelle par celle-ci :
+# ══════════════════════════════════════════════════════════════════════════════
+
+APP_AVEC_LIFESPAN = """
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    \"\"\"
+    Gestionnaire de cycle de vie de l'application FastAPI.
+    startup  : démarre APScheduler + première sync en arrière-plan
+    shutdown : arrête proprement le planificateur
+    \"\"\"
+    logger.info("🟢 Démarrage de Fantasy Boulzazen API v4.2.0")
+    await startup_handler()
+    yield
+    logger.info("🔴 Arrêt de Fantasy Boulzazen API")
+    await shutdown_handler()
+
+
+app = FastAPI(
+    title="Fantasy Boulzazen — API WC 2026",
+    description="Backend complet pour la ligue privée Fantasy Coupe du Monde",
+    version="4.2.0",
+    lifespan=lifespan,   # ← Nouveau : gestion startup/shutdown propre
+)
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLOC 3 — NOUVELLE ROUTE /sync-status À AJOUTER DANS main.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROUTE_SYNC_STATUS = """
+@app.get("/sync-status")
+async def get_sync_status():
+    \"\"\"Retourne le statut de la dernière synchronisation automatique.\"\"\"
+    stats = get_stats_sync()
+    return {
+        "status": "ok",
+        "scheduler_actif": stats.get("scheduler_actif", False),
+        "derniere_mise_a_jour": stats.get("derniere_mise_a_jour"),
+        "matchs_scraped": stats.get("matchs_scraped", 0),
+        "joueurs_recalcules": stats.get("joueurs_recalcules", 0),
+        "effectifs_nouveaux": stats.get("effectifs_nouveaux", 0),
+        "timestamp": stats.get("timestamp"),
+    }
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLOC 4 — MODIFICATION DE /matches POUR UTILISER LES DONNÉES SCRAPPÉES
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROUTE_MATCHES_DYNAMIQUE = """
+@app.get("/matches")
+async def get_matches():
+    \"\"\"
+    Retourne les matchs de la compétition.
+    Priorité : données scrappées en mémoire > données statiques MATCHS_CDM_2026
+    \"\"\"
+    if UPDATER_AVAILABLE:
+        from app.updater import get_matchs_actuels
+        matchs_dynamiques = get_matchs_actuels()
+        if matchs_dynamiques:
+            return matchs_dynamiques
+
+    # Fallback sur les données statiques définies dans main.py
+    return MATCHS_CDM_2026
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  BLOC 5 — REQUIREMENTS.TXT MIS À JOUR (apscheduler + httpx)
+# ══════════════════════════════════════════════════════════════════════════════
+
+REQUIREMENTS_UPDATED = """fastapi==0.111.0
+uvicorn[standard]==0.29.0
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+requests==2.31.0
+httpx==0.27.0
+beautifulsoup4==4.12.3
+apscheduler==3.10.4
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+groq==0.9.0
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  INSTRUCTIONS D'INTÉGRATION COMPLÈTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    print("""
+=== INSTRUCTIONS D'INTÉGRATION DE updater.py DANS main.py ===
+
+1. Copier le contenu de IMPORTS_A_AJOUTER juste AVANT la ligne:
+   SUPABASE_JWT_SECRET = os.getenv(...)
+
+2. Copier APP_AVEC_LIFESPAN et REMPLACER les lignes:
+   app = FastAPI(
+       title="Fantasy Boulzazen — API WC 2026",
+       ...
+   )
+   par le bloc APP_AVEC_LIFESPAN complet.
+
+3. Ajouter la route ROUTE_SYNC_STATUS après la route /health.
+
+4. Remplacer la route @app.get("/matches") par ROUTE_MATCHES_DYNAMIQUE.
+
+5. Mettre à jour requirements.txt avec REQUIREMENTS_UPDATED.
+   Puis: pip install -r requirements.txt
+
+6. Démarrer avec:
+   uvicorn app.main:app --reload
+   (Le scheduler démarrera automatiquement)
+""")
