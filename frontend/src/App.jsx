@@ -24,6 +24,7 @@ import AdminPanel   from './views/AdminPanel';
 // ─── Clés du cache localStorage ───────────────────────────────
 const CACHE_USER_KEY        = 'boulzazen_cache_user';
 const CACHE_LEADERBOARD_KEY = 'boulzazen_cache_leaderboard';
+const GUEST_SESSION_KEY     = 'boulzazen_guest_session';
 const CACHE_TTL_MS          = 1000 * 60 * 30; // 30 minutes
 
 // ─── Context global ────────────────────────────────────────────
@@ -72,6 +73,47 @@ function cacheGet(key, ttlMs = CACHE_TTL_MS) {
 /** Supprime une entrée du cache. */
 function cacheDel(key) {
   try { localStorage.removeItem(key); } catch { /* silencieux */ }
+}
+
+function slugifyGuestName(value) {
+  return (value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 24)
+    .toLowerCase();
+}
+
+function buildGuestSession(name) {
+  const cleanName = name.trim().slice(0, 24);
+  const slug = slugifyGuestName(cleanName) || `joueur_${Date.now()}`;
+  return {
+    access_token: 'guest-local-session',
+    user: {
+      id: `guest-${slug}`,
+      email: `${slug}@boulzazen.local`,
+      user_metadata: {
+        username: cleanName,
+        full_name: cleanName,
+        guest: true,
+      },
+    },
+  };
+}
+
+function loadGuestSession() {
+  try {
+    const raw = localStorage.getItem(GUEST_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveGuestSession(session) {
+  try { localStorage.setItem(GUEST_SESSION_KEY, JSON.stringify(session)); } catch { /* silencieux */ }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -240,6 +282,7 @@ function AuthScreen({ onSuccess, initialError }) {
   const [email,        setEmail]        = useState('');
   const [password,     setPassword]     = useState('');
   const [username,     setUsername]     = useState('');
+  const [guestName,    setGuestName]    = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading,      setLoading]      = useState(false);
   const [error,        setError]        = useState(initialError || null);
@@ -298,6 +341,20 @@ function AuthScreen({ onSuccess, initialError }) {
     }
   };
 
+  const handleGuestJoin = (e) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    const name = guestName.trim();
+    if (name.length < 2) {
+      setError('Entre un pseudo de 2 caracteres minimum.');
+      return;
+    }
+    const guestSession = buildGuestSession(name);
+    saveGuestSession(guestSession);
+    onSuccess(guestSession);
+  };
+
   return (
     <div className="login-screen">
       <div className="login-bg-grid" />
@@ -326,6 +383,20 @@ function AuthScreen({ onSuccess, initialError }) {
 
           {error   && <div className="auth-alert error">{error}</div>}
           {success && <div className="auth-alert success">{success}</div>}
+
+          <form onSubmit={handleGuestJoin} className="auth-form guest-form" noValidate>
+            <div className="auth-field">
+              <label className="auth-label"><Icon name="USER" size={14} /> Entrer avec un pseudo</label>
+              <input type="text" className="auth-input" placeholder="Ex: Samir"
+                value={guestName} onChange={e => setGuestName(e.target.value)}
+                maxLength={24} autoComplete="nickname" required />
+            </div>
+            <button type="submit" className="auth-submit-btn guest-submit">
+              Jouer maintenant
+            </button>
+          </form>
+
+          <div className="auth-separator"><span>ou compte complet</span></div>
 
           <form onSubmit={handleSubmit} className="auth-form" noValidate>
             {mode === 'register' && (
@@ -493,14 +564,21 @@ export default function App() {
       if (s) {
         setSession(s);
         triggerSync(s);
-      } else {
-        // Tente de charger le cache même sans session (lecture seule)
-        const cachedUser = cacheGet(CACHE_USER_KEY);
-        if (cachedUser) {
-          devLog('📦 Utilisateur chargé depuis le cache (sans session)');
-        }
-        splashTimer = setTimeout(() => setScreen('login'), 1800);
+        return;
       }
+
+      const guestSession = loadGuestSession();
+      if (guestSession) {
+        setSession(guestSession);
+        triggerSync(guestSession);
+        return;
+      }
+
+      const cachedUser = cacheGet(CACHE_USER_KEY);
+      if (cachedUser) {
+        devLog('Utilisateur charge depuis le cache sans session');
+      }
+      splashTimer = setTimeout(() => setScreen('login'), 1800);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -513,6 +591,7 @@ export default function App() {
           // Nettoie le cache au logout pour éviter la fuite de données
           cacheDel(CACHE_USER_KEY);
           cacheDel(CACHE_LEADERBOARD_KEY);
+          cacheDel(GUEST_SESSION_KEY);
           setUser(null); setSyncData(null); setSession(null);
           setSyncStatus('idle');
           setScreen('login');
@@ -628,6 +707,7 @@ export default function App() {
     await supabase.auth.signOut();
     cacheDel(CACHE_USER_KEY);
     cacheDel(CACHE_LEADERBOARD_KEY);
+    cacheDel(GUEST_SESSION_KEY);
     setUser(null); setSyncData(null); setSession(null);
     setSyncStatus('idle');
     setScreen('login');

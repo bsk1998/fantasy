@@ -1,0 +1,42 @@
+.predictions-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pred-status {
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.pred-status.info {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: var(--accent);
+}
+
+.pred-status.success {
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid rgba(0, 230, 118, 0.3);
+  color: var(--green);
+}
+
+.pred-status.error {
+  background: rgba(244, 63, 94, 0.08);
+  border: 1px solid rgba(244, 63, 94, 0.25);
+  color: var(--danger);
+}
+
+.fantasy-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.auth-submit-btn.compact {
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+}

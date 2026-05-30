@@ -1806,6 +1806,32 @@ h3 {
   gap: 14px;
 }
 
+.guest-form {
+  padding: 12px;
+  border: 1px solid rgba(0, 230, 118, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 230, 118, 0.06);
+}
+
+.auth-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-3);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.auth-separator::before,
+.auth-separator::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
 .auth-field {
   display: flex;
   flex-direction: column;
@@ -1919,6 +1945,11 @@ h3 {
 
 .auth-submit-btn.loading {
   pointer-events: none;
+}
+
+.guest-submit {
+  margin-top: 0;
+  background: linear-gradient(135deg, #00e676, #38bdf8);
 }
 
 /* ─── MOT DE PASSE OUBLIÉ ────────────────────────────────────────── */

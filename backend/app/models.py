@@ -110,6 +110,13 @@ class PredictionTableau(Base):
     points_earned = Column(Integer, default=0)
     user = relationship("User", back_populates="prediction_tableau")
 
+class PredictionAnnexes(Base):
+    __tablename__ = 'prediction_annexes'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), unique=True)
+    annexes_data = Column(JSON)
+    points_earned = Column(Integer, default=0)
+
 class Complaint(Base):
     __tablename__ = 'complaints'
     id = Column(Integer, primary_key=True, index=True)

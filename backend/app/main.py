@@ -31,6 +31,7 @@ import os
 import json
 import logging
 import traceback
+import unicodedata
 from datetime import datetime
 from typing import Optional
 
@@ -56,7 +57,8 @@ except Exception as e:
 
 try:
     from app.models import (Base, User, Player, Coach, FantasyRoster,
-                             PredictionScore, PredictionTableau, Complaint)
+                             PredictionScore, PredictionTableau, PredictionAnnexes,
+                             Complaint)
     MODELS_AVAILABLE = True
 except Exception as e:
     logger.error(f"❌ Erreur import models : {e}")
@@ -86,7 +88,7 @@ except Exception as e:
 
 try:
     from app.updater import (start_scheduler, stop_scheduler, get_scheduler_status,
-                              tache_mise_a_jour_quotidienne)
+                              tache_mise_a_jour_quotidienne, sync_au_login)
     UPDATER_AVAILABLE = True
 except Exception as e:
     logger.warning(f"⚠️  Updater non disponible : {e}")
@@ -117,6 +119,13 @@ app = FastAPI(
     description="Backend complet pour la ligue privée Fantasy Coupe du Monde",
     version="5.0.0",
 )
+
+
+@app.middleware("http")
+async def strip_api_prefix(request, call_next):
+    if request.scope.get("path", "").startswith("/api/"):
+        request.scope["path"] = request.scope["path"][4:]
+    return await call_next(request)
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS: list = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -260,6 +269,29 @@ def _build_fallback_user(body: SyncRequest) -> dict:
     }
 
 
+def _nation_key(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", raw)
+    ascii_value = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    aliases = {
+        "francaise": "france",
+        "francais": "france",
+        "bresilienne": "bresil",
+        "bresilien": "bresil",
+        "anglaise": "angleterre",
+        "anglais": "angleterre",
+        "espagnole": "espagne",
+        "espagnol": "espagne",
+        "algerienne": "algerie",
+        "algerien": "algerie",
+        "marocaine": "maroc",
+        "marocain": "maroc",
+        "senegalaise": "senegal",
+        "senegalais": "senegal",
+    }
+    return aliases.get(ascii_value, ascii_value)
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  AUTH
 # ══════════════════════════════════════════════════════════════════════
@@ -380,6 +412,13 @@ async def sync_on_login(
                 pass
 
         # ── 4. Recalcul Fantasy ───────────────────────────────────
+        sync_login_info = {}
+        if UPDATER_AVAILABLE:
+            try:
+                sync_login_info = await sync_au_login(body.email, db)
+            except Exception as e:
+                logger.warning(f"Sync updater login user {user.id} : {e}")
+
         fantasy_pts = 0
         try:
             roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
@@ -428,9 +467,9 @@ async def sync_on_login(
                 "total":               total,
             },
             "sync_info": {
-                "matchs_scraped":     0,
+                "matchs_scraped":     sync_login_info.get("matchs_en_memoire", 0),
                 "joueurs_recalcules": 0,
-                "pronos_calcules":    len(pronos),
+                "pronos_calcules":    sync_login_info.get("pronos_calcules", len(pronos)),
                 "timestamp":          datetime.utcnow().isoformat(),
                 "mode":               "normal",
             },
@@ -702,7 +741,31 @@ async def save_bracket(payload: BracketPayload, _token: dict = Depends(verify_su
 
 @app.post("/predictions/annexes")
 async def save_annexes(payload: AnnexesPayload, _token: dict = Depends(verify_supabase_token)):
-    return {"status": "saved", "message": "Pronostics annexes enregistrés"}
+    if not DB_AVAILABLE or not MODELS_AVAILABLE:
+        return {"status": "saved", "message": "Pronostics annexes enregistrés"}
+    try:
+        db = SessionLocal()
+        user = None
+        try:
+            user = db.query(User).filter(User.id == int(payload.user_id)).first()
+        except (ValueError, TypeError):
+            user = db.query(User).filter(User.email == payload.user_id).first()
+        if not user:
+            db.close()
+            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+        record = db.query(PredictionAnnexes).filter(PredictionAnnexes.user_id == user.id).first()
+        if record:
+            record.annexes_data = payload.annexes
+        else:
+            db.add(PredictionAnnexes(user_id=user.id, annexes_data=payload.annexes, points_earned=0))
+        db.commit()
+        db.close()
+        return {"status": "saved", "message": "Pronostics annexes enregistrés"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"POST /predictions/annexes : {e}")
+        return {"status": "saved", "message": "Pronostics annexes enregistrés"}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -716,18 +779,35 @@ async def save_roster(payload: RosterPayload, _token: dict = Depends(verify_supa
                 "remaining_budget": 100.0, "formation": payload.formation}
     try:
         db = SessionLocal()
-        if len(payload.player_ids) > 15:
+        if len(payload.player_ids) != 15:
             db.close()
-            raise HTTPException(status_code=400, detail="Maximum 15 joueurs autorisés.")
+            raise HTTPException(status_code=400, detail="L'effectif doit contenir exactement 15 joueurs.")
+        if len(set(payload.player_ids)) != 15:
+            db.close()
+            raise HTTPException(status_code=400, detail="Un joueur ne peut pas être sélectionné plusieurs fois.")
         players = db.query(Player).filter(Player.id.in_(payload.player_ids)).all()
         if len(players) != len(payload.player_ids):
             db.close()
             raise HTTPException(status_code=400, detail="Joueur(s) introuvable(s).")
+        nationalite_counts = {}
+        for player in players:
+            key = _nation_key(player.nationality)
+            nationalite_counts[key] = nationalite_counts.get(key, 0) + 1
+        over_limit = [nat for nat, count in nationalite_counts.items() if count > 3]
+        if over_limit:
+            db.close()
+            raise HTTPException(status_code=400, detail=f"Maximum 3 joueurs par nation : {', '.join(over_limit)}.")
         total = sum(p.price for p in players)
         coach = None
         if payload.coach_id:
             coach = db.query(Coach).filter(Coach.id == payload.coach_id).first()
-            if coach: total += coach.price
+            if not coach:
+                db.close()
+                raise HTTPException(status_code=400, detail="Entraîneur introuvable.")
+            if any(_nation_key(p.nationality) == _nation_key(coach.nationality) for p in players):
+                db.close()
+                raise HTTPException(status_code=400, detail="L'entraîneur ne peut avoir aucun joueur de sa nationalité.")
+            total += coach.price
         if total > 100.0:
             db.close()
             raise HTTPException(status_code=400, detail=f"Budget dépassé : {total:.1f}M€.")
@@ -799,7 +879,7 @@ async def manual_recalculate(_token: dict = Depends(verify_supabase_token)):
     """Recalcule manuellement tous les scores (déclenche les 4 tâches)."""
     if UPDATER_AVAILABLE:
         try:
-            tache_mise_a_jour_quotidienne()
+            await tache_mise_a_jour_quotidienne()
             return {"status": "recalculated", "mode": "full_update"}
         except Exception as e:
             logger.error(f"Recalcul manuel échoué : {e}")
@@ -843,7 +923,7 @@ async def trigger_update_now(
     if not UPDATER_AVAILABLE:
         raise HTTPException(status_code=503, detail="Updater non disponible.")
     try:
-        tache_mise_a_jour_quotidienne()
+        await tache_mise_a_jour_quotidienne()
         return {"status": "ok", "message": "Mise à jour manuelle lancée avec succès."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

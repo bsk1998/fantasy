@@ -1,0 +1,19 @@
+{
+  "name": "Fantasy Gaming WC 2026",
+  "short_name": "Fantasy WC",
+  "description": "Fantasy Gaming WC 2026 - Boulzazen",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#080d18",
+  "theme_color": "#080d18",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,11 +1,35 @@
 import React, { useState, useEffect } from 'react';
 import { API_BASE } from '../config';
+import { useApp } from '../App';
+
+const nationKey = (value = '') => {
+  const raw = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const aliases = {
+    francaise: 'france',
+    francais: 'france',
+    bresilienne: 'bresil',
+    bresilien: 'bresil',
+    anglaise: 'angleterre',
+    anglais: 'angleterre',
+    espagnole: 'espagne',
+    espagnol: 'espagne',
+    algerienne: 'algerie',
+    algerien: 'algerie',
+    marocaine: 'maroc',
+    marocain: 'maroc',
+    senegalaise: 'senegal',
+    senegalais: 'senegal',
+  };
+  return aliases[raw] || raw;
+};
 
 export default function MyTeam() {
+  const { user, session } = useApp();
   const [players, setPlayers] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [saveStatus, setSaveStatus] = useState(null);
 
   const [roster, setRoster] = useState([]);
   const [selectedCoach, setSelectedCoach] = useState(null);
@@ -42,14 +66,14 @@ export default function MyTeam() {
   }, []);
 
   const roundToTwo = (num) => +(Math.round(num + "e+2") + "e-2");
-  const getCountryCount = (nationality) => roster.filter(p => p.nationality === nationality).length;
+  const getCountryCount = (nationality) => roster.filter(p => nationKey(p.nationality) === nationKey(nationality)).length;
 
   const handleBuyPlayer = (player) => {
     if (roster.find(p => p.id === player.id)) return;
     if (roster.length >= 15) return alert("Ton effectif est complet (15 joueurs max) !");
     if (budget - player.price < 0) return alert("Budget insuffisant !");
     if (getCountryCount(player.nationality) >= 3) return alert(`Limite : Max 3 joueurs (${player.nationality}) !`);
-    if (selectedCoach && selectedCoach.nationality === player.nationality) return alert(`Conflit nationalité Coach.`);
+    if (selectedCoach && nationKey(selectedCoach.nationality) === nationKey(player.nationality)) return alert(`Conflit nationalité Coach.`);
 
     setRoster(prev => [...prev, player]);
     setBudget(prev => roundToTwo(prev - player.price));
@@ -66,13 +90,107 @@ export default function MyTeam() {
       setSelectedCoach(null);
       return;
     }
-    const nationalitiesInRoster = roster.map(p => p.nationality);
-    if (nationalitiesInRoster.includes(coach.nationality)) return alert(`Conflit Joueur/Coach (${coach.nationality}).`);
+    const nationalitiesInRoster = roster.map(p => nationKey(p.nationality));
+    if (nationalitiesInRoster.includes(nationKey(coach.nationality))) return alert(`Conflit Joueur/Coach (${coach.nationality}).`);
     if (budget - coach.price < 0) return alert("Budget insuffisant coach.");
 
     const refund = selectedCoach ? selectedCoach.price : 0;
     setSelectedCoach(coach);
     setBudget(prev => roundToTwo(prev + refund - coach.price));
+  };
+
+  const autoFillRoster = () => {
+    const formations = {
+      '4-3-3': { G: 1, D: 4, M: 3, A: 3 },
+      '4-4-2': { G: 1, D: 4, M: 4, A: 2 },
+      '3-5-2': { G: 1, D: 3, M: 5, A: 2 }
+    };
+    const bench = { G: 1, D: 1, M: 1, A: 1 };
+    const required = Object.fromEntries(Object.entries(formations[formation]).map(([pos, qty]) => [pos, qty + bench[pos]]));
+    const picked = [];
+    const counts = {};
+    let coachForAutofill = selectedCoach;
+    const coachReserve = coachForAutofill?.price || Math.min(...coaches.map(c => c.price), 0);
+    let remaining = 100 - coachReserve;
+
+    const addPlayer = (player) => {
+      const key = nationKey(player.nationality);
+      if (picked.some(p => p.id === player.id)) return false;
+      if ((counts[key] || 0) >= 3) return false;
+      if (coachForAutofill && nationKey(coachForAutofill.nationality) === key) return false;
+      if (remaining - player.price < 0) return false;
+      picked.push(player);
+      counts[key] = (counts[key] || 0) + 1;
+      remaining = roundToTwo(remaining - player.price);
+      return true;
+    };
+
+    Object.entries(required).forEach(([pos, qty]) => {
+      for (const player of players
+        .filter(p => p.position === pos)
+        .sort((a, b) => a.price - b.price)) {
+        if (picked.filter(p => p.position === pos).length >= qty) break;
+        addPlayer(player);
+      }
+    });
+
+    for (const player of players
+      .filter(p => !picked.some(x => x.id === p.id))
+      .sort((a, b) => a.price - b.price)) {
+      if (picked.length >= 15) break;
+      addPlayer(player);
+    }
+
+    if (picked.length < 15) {
+      setSaveStatus({ type: 'error', text: 'Auto-Fill impossible avec le marché actuel.' });
+      return;
+    }
+
+    if (!coachForAutofill) {
+      coachForAutofill = [...coaches]
+        .sort((a, b) => a.price - b.price)
+        .find(coach => coach.price <= remaining && !picked.some(p => nationKey(p.nationality) === nationKey(coach.nationality)));
+      if (!coachForAutofill) {
+        setSaveStatus({ type: 'error', text: 'Auto-Fill impossible: aucun entraîneur compatible.' });
+        return;
+      }
+      remaining = roundToTwo(remaining - Math.max(0, coachForAutofill.price - coachReserve));
+    }
+
+    setRoster(picked);
+    setSelectedCoach(coachForAutofill);
+    setBudget(remaining);
+    setSaveStatus({ type: 'success', text: 'Équipe remplie automatiquement.' });
+  };
+
+  const saveRoster = async () => {
+    setSaveStatus(null);
+    if (roster.length !== 15 || !selectedCoach) {
+      setSaveStatus({ type: 'error', text: 'Il faut 15 joueurs et 1 entraîneur.' });
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/fantasy/roster`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {})
+        },
+        body: JSON.stringify({
+          user_id: user?.id || session?.user?.email,
+          player_ids: roster.map(p => p.id),
+          coach_id: selectedCoach.id,
+          formation
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Sauvegarde refusée.');
+      setBudget(data.remaining_budget ?? budget);
+      setSaveStatus({ type: 'success', text: 'Équipe sauvegardée.' });
+    } catch (err) {
+      setSaveStatus({ type: 'error', text: err.message });
+    }
   };
 
   const slots = {
@@ -134,6 +252,12 @@ export default function MyTeam() {
           <h3 className={budget < 10 ? 'danger' : 'green'}>{budget} M€</h3>
         </div>
       </div>
+
+      <div className="fantasy-actions">
+        <button className="mrg-save-btn" type="button" onClick={autoFillRoster}>Auto-Fill</button>
+        <button className="auth-submit-btn compact" type="button" onClick={saveRoster}>Sauvegarder</button>
+      </div>
+      {saveStatus && <div className={`pred-status ${saveStatus.type}`}>{saveStatus.text}</div>}
 
       {/* DISPOSITION MAIN GRILLE */}
       <div className="fantasy-main-layout">
@@ -198,7 +322,7 @@ export default function MyTeam() {
                   {filteredPlayers.map(player => {
                     const isBought = roster.find(p => p.id === player.id);
                     const countryLimitReached = getCountryCount(player.nationality) >= 3 && !isBought;
-                    const coachConflict = selectedCoach && selectedCoach.nationality === player.nationality;
+                    const coachConflict = selectedCoach && nationKey(selectedCoach.nationality) === nationKey(player.nationality);
                     const isDisabled = countryLimitReached || coachConflict;
 
                     return (
@@ -223,7 +347,7 @@ export default function MyTeam() {
               <div className="market-list">
                 {coaches.map(coach => {
                   const isSelected = selectedCoach && selectedCoach.id === coach.id;
-                  const hasPlayerConflict = roster.map(p => p.nationality).includes(coach.nationality);
+                  const hasPlayerConflict = roster.map(p => nationKey(p.nationality)).includes(nationKey(coach.nationality));
                   const isDisabled = hasPlayerConflict && !isSelected;
 
                   return (

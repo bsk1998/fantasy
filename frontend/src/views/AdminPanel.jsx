@@ -618,7 +618,7 @@ export default function AdminPanel() {
     setRecalcLoading(true);
     setRecalcStatus(null);
     try {
-      const res = await fetch(`${API_BASE}/admin/recalculate`, {
+      const res = await fetch(`${API_BASE}/api/admin/recalculate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

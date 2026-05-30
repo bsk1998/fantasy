@@ -1,5 +1,6 @@
 import React from 'react';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
+import { API_BASE } from '../config';
 
 export default function Login({ onLoginSuccess }) {
   // En production, tu obtiendras ce Client ID gratuitement sur la console Google Cloud
@@ -10,7 +11,7 @@ export default function Login({ onLoginSuccess }) {
     
     // Envoi du jeton Google au backend Python pour vérification et création de compte
     try {
-      const response = await fetch('http://localhost:8000/api/auth/google', {
+      const response = await fetch(`${API_BASE}/api/auth/google`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: token })
