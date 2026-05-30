@@ -1,35 +1,22 @@
-MATCHS_GROUPES = [
-    {"id": 1, "domicile": "USA", "exterieur": "Canada", "groupe": "Groupe A", "date": "2026-06-11", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 2, "domicile": "Mexique", "exterieur": "Jamaïque", "groupe": "Groupe A", "date": "2026-06-11", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 3, "domicile": "France", "exterieur": "Belgique", "groupe": "Groupe B", "date": "2026-06-12", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 4, "domicile": "Maroc", "exterieur": "Tunisie", "groupe": "Groupe B", "date": "2026-06-12", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 5, "domicile": "Brésil", "exterieur": "Argentine", "groupe": "Groupe C", "date": "2026-06-13", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 6, "domicile": "Uruguay", "exterieur": "Colombie", "groupe": "Groupe C", "date": "2026-06-13", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 7, "domicile": "Angleterre", "exterieur": "Allemagne", "groupe": "Groupe D", "date": "2026-06-14", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 8, "domicile": "Pays-Bas", "exterieur": "Croatie", "groupe": "Groupe D", "date": "2026-06-14", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 9, "domicile": "Espagne", "exterieur": "Portugal", "groupe": "Groupe E", "date": "2026-06-15", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 10, "domicile": "Italie", "exterieur": "Suisse", "groupe": "Groupe E", "date": "2026-06-15", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 11, "domicile": "Japon", "exterieur": "Corée du Sud", "groupe": "Groupe F", "date": "2026-06-16", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 12, "domicile": "Australie", "exterieur": "Iran", "groupe": "Groupe F", "date": "2026-06-16", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 13, "domicile": "Sénégal", "exterieur": "Algérie", "groupe": "Groupe G", "date": "2026-06-17", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 14, "domicile": "Nigeria", "exterieur": "Ghana", "groupe": "Groupe G", "date": "2026-06-17", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 15, "domicile": "Côte d'Ivoire", "exterieur": "Égypte", "groupe": "Groupe H", "date": "2026-06-18", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-    {"id": 16, "domicile": "Cameroun", "exterieur": "Mali", "groupe": "Groupe H", "date": "2026-06-18", "is_locked": False, "score_dom": None, "score_ext": None, "is_finished": False},
-]
+"""
+data_wc2026.py — Données de la Coupe du Monde 2026
+===================================================
 
-ENTRAINEURS = {
-    "France": {"nom": "Didier Deschamps", "nationalite": "France", "prix": 5.0},
-    "Belgique": {"nom": "Domenico Tedesco", "nationalite": "Belgique", "prix": 4.5},
-    "Maroc": {"nom": "Walid Regragui", "nationalite": "Maroc", "prix": 4.5},
-    "Argentine": {"nom": "Lionel Scaloni", "nationalite": "Argentine", "prix": 5.0},
-    "Brésil": {"nom": "Dorival Júnior", "nationalite": "Brésil", "prix": 5.0},
-    "Angleterre": {"nom": "Thomas Tuchel", "nationalite": "Allemagne", "prix": 5.0},
-    "Espagne": {"nom": "Luis de la Fuente", "nationalite": "Espagne", "prix": 5.0},
-    "Portugal": {"nom": "Roberto Martínez", "nationalite": "Espagne", "prix": 4.5},
-    "Sénégal": {"nom": "Pape Thiaw", "nationalite": "Sénégal", "prix": 4.0},
-    "Algérie": {"nom": "Vladimir Petković", "nationalite": "Suisse", "prix": 4.0},
-}
+⚠️ CE FICHIER EST MAINTENANT VIDE
 
+Toutes les données (matchs, effectifs, entraîneurs, classements) sont désormais:
+- Scrappées en temps réel depuis Sofascore et Olympics via Groq IA
+- Stockées dans la base de données (tables MatchResult, Player, Coach, TeamNation, GroupStanding)
+- Mises à jour automatiquement via le scheduler
 
-def get_tous_les_matchs():
-    return MATCHS_GROUPES
+Les fonctions précédentes ont été supprimées :
+- MATCHS_GROUPES ❌ → MatchResult table
+- ENTRAINEURS ❌ → Coach table
+- get_tous_les_matchs() ❌ → get_matchs_actuels() dans updater.py
+
+Voir backend/app/scraper.py pour le pipeline de scraping.
+Voir backend/app/updater.py pour le scheduler intelligent.
+"""
+
+# Ce fichier est conservé pour la compatibilité des imports existants
+# mais ne contient AUCUNE donnée codée en dur.

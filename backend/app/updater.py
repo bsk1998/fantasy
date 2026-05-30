@@ -1,363 +1,497 @@
 """
-updater.py — Orchestrateur de mises à jour automatiques pour Fantasy Boulzazen WC 2026
-v5.1 — Fix : ajout des alias start_scheduler / stop_scheduler / get_scheduler_status
+Orchestrateur de synchronisation officielle.
+
+Chaque appel de sync_au_login execute une synchronisation fraiche des sources
+FIFA/Olympics. Aucune donnee sportive locale n'est utilisee comme fallback:
+si une source ne confirme pas une information, elle n'est pas creee.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Any
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import text
+
+from app.database import SessionLocal
+from app.models import Coach, FantasyRoster, Player, PredictionScore, TeamNation, User
+from app.rules_engine import calculer_points_pronostic_score
+from app.scraper import scraping_complet
 
 logger = logging.getLogger("fantasy_updater")
 
-# ── APScheduler ───────────────────────────────────────────────────────────────
-try:
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-    SCHEDULER_AVAILABLE = True
-except ImportError:
-    logger.warning("apscheduler non installé — pip install apscheduler==3.10.4")
-    SCHEDULER_AVAILABLE = False
-
-# ── Scraper ───────────────────────────────────────────────────────────────────
-try:
-    from app.scraper import (scraping_complet, detecter_nouvelles_listes,
-                             scraper_effectifs_olympics, convertir_effectif_pour_db,
-                             get_all_players_market)
-    SCRAPER_AVAILABLE = True
-except ImportError:
-    try:
-        from scraper import (scraping_complet, detecter_nouvelles_listes,
-                             scraper_effectifs_olympics, convertir_effectif_pour_db,
-                             get_all_players_market)
-        SCRAPER_AVAILABLE = True
-    except ImportError:
-        logger.warning("Module scraper non disponible")
-        SCRAPER_AVAILABLE = False
-
-# ── Base de données ───────────────────────────────────────────────────────────
-try:
-    from app.database import SessionLocal
-    from app.models import User, Player, Coach, FantasyRoster, PredictionScore
-    DB_AVAILABLE = True
-except ImportError:
-    try:
-        from database import SessionLocal
-        from models import User, Player, Coach, FantasyRoster, PredictionScore
-        DB_AVAILABLE = True
-    except ImportError:
-        logger.warning("Base de données non disponible pour updater")
-        DB_AVAILABLE = False
-
-# ── Rules engine ──────────────────────────────────────────────────────────────
-try:
-    from app.rules_engine import calculer_points_pronostic_score
-    RULES_AVAILABLE = True
-except ImportError:
-    try:
-        from rules_engine import calculer_points_pronostic_score
-        RULES_AVAILABLE = True
-    except ImportError:
-        RULES_AVAILABLE = False
-
-# ── État global en mémoire ────────────────────────────────────────────────────
-_derniere_mise_a_jour: Optional[str] = None
-_matchs_en_memoire: list = []
-_classements_en_memoire: dict = {}
-_statistiques_derniere_sync = {
+_scheduler: AsyncIOScheduler | None = None
+_sync_lock = asyncio.Lock()
+_derniere_mise_a_jour: str | None = None
+_matchs_en_memoire: list[dict[str, Any]] = []
+_classements_en_memoire: dict[str, list[dict[str, Any]]] = {}
+_statistiques_derniere_sync: dict[str, Any] = {
     "matchs_scraped": 0,
     "joueurs_recalcules": 0,
     "effectifs_nouveaux": 0,
     "timestamp": None,
     "erreurs": [],
 }
-_scheduler: Optional[any] = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SYNC BDD
-# ─────────────────────────────────────────────────────────────────────────────
+def _utc_now() -> str:
+    return datetime.utcnow().isoformat()
 
-def _sync_matchs_en_db(matchs: list, db) -> int:
-    from sqlalchemy import text
-    mis_a_jour = 0
-    for match in matchs:
-        if not match.get("is_finished"):
-            continue
-        try:
-            db.execute(
-                text("""
-                    INSERT OR REPLACE INTO match_results
-                    (match_id, home_score, away_score, is_finished)
-                    VALUES (:mid, :hs, :as, 1)
-                """),
-                {"mid": match["id"], "hs": match.get("home_score"), "as": match.get("away_score")}
+
+def _ensure_runtime_tables(db) -> None:
+    """Cree les tables dynamiques qui stockent les faits officiels scrapes."""
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS match_results (
+                match_id TEXT PRIMARY KEY,
+                display_order INTEGER,
+                home TEXT NOT NULL,
+                away TEXT NOT NULL,
+                match_group TEXT,
+                match_date TEXT,
+                home_score INTEGER,
+                away_score INTEGER,
+                status TEXT,
+                is_finished INTEGER DEFAULT 0,
+                is_locked INTEGER DEFAULT 0,
+                qualified_teams TEXT,
+                last_updated TEXT NOT NULL
             )
-            mis_a_jour += 1
-        except Exception:
-            pass
-    return mis_a_jour
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS group_standings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_name TEXT NOT NULL,
+                team TEXT NOT NULL,
+                points INTEGER DEFAULT 0,
+                played INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                goals_for INTEGER DEFAULT 0,
+                goals_against INTEGER DEFAULT 0,
+                goal_diff INTEGER DEFAULT 0,
+                qualified INTEGER DEFAULT 0,
+                last_updated TEXT NOT NULL,
+                UNIQUE(group_name, team)
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS source_syncs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+    )
+    db.commit()
 
 
-def _sync_effectifs_en_db(effectifs_nouveaux: list, db) -> int:
-    inseres = 0
-    for effectif in effectifs_nouveaux:
-        if not effectif.get("is_definitive"):
-            continue
-        for joueur_data in effectif.get("joueurs", []):
-            try:
-                existing = db.query(Player).filter(
-                    Player.name == joueur_data["name"],
-                    Player.nationality == joueur_data["nationality"],
-                ).first()
-                if not existing:
-                    db.add(Player(
-                        name=joueur_data["name"], position=joueur_data["position"],
-                        nationality=joueur_data["nationality"], price=joueur_data.get("price", 6.0),
-                        is_confirmed=True, goals=0, assists=0, points_total=0,
-                    ))
-                    inseres += 1
-                else:
-                    existing.is_confirmed = True
-            except Exception as e:
-                logger.warning(f"Erreur insertion joueur {joueur_data.get('name')}: {e}")
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Erreur commit effectifs : {e}")
-    return inseres
+def _normalize(value: str | None) -> str:
+    import re
+    import unicodedata
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  RECALCUL POINTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _recalculer_points_tous_utilisateurs(db, matchs_termines: list) -> int:
-    mis_a_jour = 0
-    matchs_index = {
-        m["id"]: m for m in matchs_termines
-        if m.get("is_finished") and m.get("home_score") is not None
+    raw = (value or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", raw)
+    ascii_value = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    ascii_value = re.sub(r"[^a-z0-9]+", " ", ascii_value).strip()
+    aliases = {
+        "usa": "etats unis",
+        "united states": "etats unis",
+        "francaise": "france",
+        "francais": "france",
+        "bresilienne": "bresil",
+        "bresilien": "bresil",
+        "anglaise": "angleterre",
+        "anglais": "angleterre",
+        "espagnole": "espagne",
+        "espagnol": "espagne",
+        "algerienne": "algerie",
+        "algerien": "algerie",
+        "marocaine": "maroc",
+        "marocain": "maroc",
+        "senegalaise": "senegal",
+        "senegalais": "senegal",
     }
-    try:
-        users = db.query(User).all()
-    except Exception as e:
-        logger.error(f"Impossible de récupérer les utilisateurs : {e}")
-        return 0
+    return aliases.get(ascii_value, ascii_value)
 
-    for user in users:
-        try:
-            fantasy_pts = 0
-            roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
-            if roster:
-                fantasy_pts = sum((p.points_total or 0) for p in roster.players)
-                if roster.coach:
-                    fantasy_pts += (roster.coach.points_total or 0)
-            user.score_fantasy = fantasy_pts
 
-            pronos = db.query(PredictionScore).filter(PredictionScore.user_id == user.id).all()
-            total_pronos_pts = 0
-            for prono in pronos:
-                match_reel = matchs_index.get(prono.match_id)
-                if match_reel and RULES_AVAILABLE:
-                    pts = calculer_points_pronostic_score(
-                        prono.predicted_home_score, prono.predicted_away_score,
-                        match_reel["home_score"], match_reel["away_score"],
-                    )
-                    if prono.points_earned != pts:
-                        prono.points_earned = pts
-                total_pronos_pts += (prono.points_earned or 0)
-            user.score_predictor_scores = total_pronos_pts
-            mis_a_jour += 1
-        except Exception as e:
-            logger.warning(f"Erreur recalcul user {user.id} : {e}")
+def _sync_matchs_en_db(matchs: list[dict[str, Any]], db) -> int:
+    """Persiste les matchs visibles sur FIFA."""
+    import json
+
+    _ensure_runtime_tables(db)
+    updated = 0
+    now = _utc_now()
+    for match in matchs:
+        if not match.get("home") or not match.get("away"):
             continue
+        db.execute(
+            text(
+                """
+                INSERT INTO match_results (
+                    match_id, display_order, home, away, match_group, match_date,
+                    home_score, away_score, status, is_finished, is_locked,
+                    qualified_teams, last_updated
+                )
+                VALUES (
+                    :match_id, :display_order, :home, :away, :match_group, :match_date,
+                    :home_score, :away_score, :status, :is_finished, :is_locked,
+                    :qualified_teams, :last_updated
+                )
+                ON CONFLICT(match_id) DO UPDATE SET
+                    display_order=excluded.display_order,
+                    home=excluded.home,
+                    away=excluded.away,
+                    match_group=excluded.match_group,
+                    match_date=excluded.match_date,
+                    home_score=excluded.home_score,
+                    away_score=excluded.away_score,
+                    status=excluded.status,
+                    is_finished=excluded.is_finished,
+                    is_locked=excluded.is_locked,
+                    qualified_teams=excluded.qualified_teams,
+                    last_updated=excluded.last_updated
+                """
+            ),
+            {
+                "match_id": str(match.get("id")),
+                "display_order": match.get("order") or 0,
+                "home": match["home"],
+                "away": match["away"],
+                "match_group": match.get("group"),
+                "match_date": match.get("date"),
+                "home_score": match.get("home_score"),
+                "away_score": match.get("away_score"),
+                "status": match.get("status") or "unknown",
+                "is_finished": 1 if match.get("is_finished") else 0,
+                "is_locked": 1 if match.get("is_locked") else 0,
+                "qualified_teams": json.dumps(match.get("qualified_teams") or [], ensure_ascii=False),
+                "last_updated": now,
+            },
+        )
+        updated += 1
+    db.commit()
+    return updated
 
-    try:
-        db.commit()
-        logger.info(f"✅ Recalcul terminé : {mis_a_jour} utilisateurs mis à jour")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Erreur commit recalcul : {e}")
-    return mis_a_jour
+
+def _sync_classements_en_db(classements: dict[str, list[dict[str, Any]]], db) -> int:
+    """Persiste les classements officiels FIFA."""
+    _ensure_runtime_tables(db)
+    updated = 0
+    now = _utc_now()
+    for group_name, rows in (classements or {}).items():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            team = row.get("equipe") or row.get("team")
+            if not team:
+                continue
+            db.execute(
+                text(
+                    """
+                    INSERT INTO group_standings (
+                        group_name, team, points, played, wins, draws, losses,
+                        goals_for, goals_against, goal_diff, qualified, last_updated
+                    )
+                    VALUES (
+                        :group_name, :team, :points, :played, :wins, :draws, :losses,
+                        :goals_for, :goals_against, :goal_diff, :qualified, :last_updated
+                    )
+                    ON CONFLICT(group_name, team) DO UPDATE SET
+                        points=excluded.points,
+                        played=excluded.played,
+                        wins=excluded.wins,
+                        draws=excluded.draws,
+                        losses=excluded.losses,
+                        goals_for=excluded.goals_for,
+                        goals_against=excluded.goals_against,
+                        goal_diff=excluded.goal_diff,
+                        qualified=excluded.qualified,
+                        last_updated=excluded.last_updated
+                    """
+                ),
+                {
+                    "group_name": group_name,
+                    "team": team,
+                    "points": row.get("points") or 0,
+                    "played": row.get("joues") or row.get("played") or 0,
+                    "wins": row.get("gagnes") or row.get("wins") or 0,
+                    "draws": row.get("nuls") or row.get("draws") or 0,
+                    "losses": row.get("perdus") or row.get("losses") or 0,
+                    "goals_for": row.get("buts_pour") or row.get("goals_for") or 0,
+                    "goals_against": row.get("buts_contre") or row.get("goals_against") or 0,
+                    "goal_diff": row.get("diff") or row.get("goal_diff") or 0,
+                    "qualified": 1 if row.get("qualified") else 0,
+                    "last_updated": now,
+                },
+            )
+            updated += 1
+    db.commit()
+    return updated
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  TÂCHE QUOTIDIENNE
-# ─────────────────────────────────────────────────────────────────────────────
+def _nations_officielles(matchs: list[dict[str, Any]], classements: dict[str, list[dict[str, Any]]]) -> set[str]:
+    """Construit la liste des nations visibles sur FIFA pour appliquer le verrou."""
+    nations: set[str] = set()
+    for match in matchs:
+        for key in ("home", "away"):
+            if match.get(key):
+                nations.add(match[key])
+        for team in match.get("qualified_teams") or []:
+            nations.add(team)
+    for rows in (classements or {}).values():
+        for row in rows:
+            team = row.get("equipe") or row.get("team")
+            if team:
+                nations.add(team)
+    return nations
 
-async def tache_mise_a_jour_quotidienne():
+
+def _sync_effectifs_et_verrous(
+    effectifs: list[dict[str, Any]],
+    matchs: list[dict[str, Any]],
+    classements: dict[str, list[dict[str, Any]]],
+    db,
+) -> int:
+    """
+    Deverrouille uniquement les nations avec liste definitive Olympics.
+    Les autres nations connues restent verrouillees et sans effectif selectionnable.
+    """
+    now = _utc_now()
+    official_nations = _nations_officielles(matchs, classements)
+    published_by_key = {_normalize(e.get("nation")): e for e in effectifs if e.get("is_definitive")}
+    all_keys = {_normalize(n): n for n in official_nations}
+    for effectif in effectifs:
+        if effectif.get("nation"):
+            all_keys[_normalize(effectif["nation"])] = effectif["nation"]
+
+    for nation_key, nation_name in all_keys.items():
+        team = db.query(TeamNation).filter(TeamNation.name == nation_name).first()
+        if not team:
+            team = TeamNation(name=nation_name, group=None)
+            db.add(team)
+        team.squad_status = "definitive" if nation_key in published_by_key else "locked"
+        team.last_updated = now
+
+    players = db.query(Player).all()
+    for player in players:
+        if _normalize(player.nationality) not in published_by_key:
+            db.delete(player)
+
+    coaches = db.query(Coach).all()
+    for coach in coaches:
+        if _normalize(coach.nationality) not in published_by_key:
+            db.delete(coach)
+
+    inserted_or_updated = 0
+    for effectif in published_by_key.values():
+        nation = effectif["nation"]
+        for joueur in effectif.get("joueurs", []):
+            existing = (
+                db.query(Player)
+                .filter(Player.name == joueur["name"], Player.nationality == nation)
+                .first()
+            )
+            if not existing:
+                existing = Player(name=joueur["name"], nationality=nation)
+                db.add(existing)
+            existing.position = joueur.get("position") or "M"
+            existing.price = joueur.get("price") or 6.0
+            existing.is_confirmed = True
+            existing.goals = existing.goals or 0
+            existing.assists = existing.assists or 0
+            existing.points_total = existing.points_total or 0
+            inserted_or_updated += 1
+
+        entraineur = (effectif.get("entraineur") or "").strip()
+        if entraineur:
+            coach = db.query(Coach).filter(Coach.name == entraineur, Coach.nationality == nation).first()
+            if not coach:
+                coach = Coach(name=entraineur, nationality=nation)
+                db.add(coach)
+            coach.price = coach.price or 5.0
+            coach.is_confirmed = True
+            coach.status = "present"
+
+    db.commit()
+    return inserted_or_updated
+
+
+def _recalculer_points_tous_utilisateurs(db, matchs_termines: list[dict[str, Any]]) -> int:
+    """Recalcule fantasy et pronostics a partir des faits reels disponibles."""
+    matchs_index = {
+        str(m["id"]): m
+        for m in matchs_termines
+        if m.get("is_finished") and m.get("home_score") is not None and m.get("away_score") is not None
+    }
+    updated = 0
+    for user in db.query(User).all():
+        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
+        fantasy_pts = 0
+        if roster:
+            fantasy_pts = sum((p.points_total or 0) for p in roster.players)
+            if roster.coach:
+                fantasy_pts += roster.coach.points_total or 0
+        user.score_fantasy = fantasy_pts
+
+        prono_pts = 0
+        for prono in db.query(PredictionScore).filter(PredictionScore.user_id == user.id).all():
+            match = matchs_index.get(str(prono.match_id))
+            if match:
+                prono.points_earned = calculer_points_pronostic_score(
+                    prono.predicted_home_score,
+                    prono.predicted_away_score,
+                    match["home_score"],
+                    match["away_score"],
+                )
+            prono_pts += prono.points_earned or 0
+        user.score_predictor_scores = prono_pts
+        updated += 1
+    db.commit()
+    return updated
+
+
+async def _executer_sync_officielle(db) -> dict[str, Any]:
+    """Execute Playwright + Groq puis applique les resultats a la BDD."""
     global _derniere_mise_a_jour, _matchs_en_memoire, _classements_en_memoire
     global _statistiques_derniere_sync
 
     debut = time.time()
-    logger.info(f"🔄 [{datetime.utcnow().isoformat()}] Début mise à jour quotidienne...")
-    stats = {
-        "matchs_scraped": 0, "joueurs_recalcules": 0,
-        "effectifs_nouveaux": 0, "timestamp": datetime.utcnow().isoformat(), "erreurs": [],
+    resultats = await scraping_complet()
+    matchs = resultats.get("matchs", [])
+    classements = resultats.get("classements", {})
+    effectifs = resultats.get("effectifs", [])
+
+    matchs_db = _sync_matchs_en_db(matchs, db) if matchs else 0
+    classements_db = _sync_classements_en_db(classements, db) if classements else 0
+    joueurs_db = _sync_effectifs_et_verrous(effectifs, matchs, classements, db)
+    users_updated = _recalculer_points_tous_utilisateurs(
+        db,
+        [m for m in matchs if m.get("is_finished")],
+    )
+
+    _matchs_en_memoire = matchs
+    _classements_en_memoire = classements
+    _derniere_mise_a_jour = _utc_now()
+    _statistiques_derniere_sync = {
+        "matchs_scraped": len(matchs),
+        "matchs_enregistres": matchs_db,
+        "classements_enregistres": classements_db,
+        "joueurs_recalcules": users_updated,
+        "effectifs_nouveaux": len(effectifs),
+        "nations_deverrouillees": resultats.get("nations_deverrouillees", []),
+        "timestamp": _derniere_mise_a_jour,
+        "duration_seconds": round(time.time() - debut, 2),
+        "erreurs": [],
     }
-
-    try:
-        if SCRAPER_AVAILABLE:
-            resultats = await scraping_complet()
-            matchs      = resultats.get("matchs", [])
-            classements = resultats.get("classements", {})
-            effectifs   = resultats.get("effectifs", [])
-            resume      = resultats.get("resume", {})
-            _matchs_en_memoire    = matchs
-            _classements_en_memoire = classements
-            stats["matchs_scraped"] = resume.get("matchs_scraped", 0)
-            stats["effectifs_nouveaux"] = len(effectifs)
-        else:
-            matchs = []
-            effectifs = []
-
-        if DB_AVAILABLE and matchs:
-            db = None
-            try:
-                db = SessionLocal()
-                if effectifs:
-                    nb_inseres = _sync_effectifs_en_db(effectifs, db)
-                    logger.info(f"📋 {nb_inseres} nouveaux joueurs insérés en BDD")
-                matchs_termines = [m for m in matchs if m.get("is_finished")]
-                nb_users = _recalculer_points_tous_utilisateurs(db, matchs_termines)
-                stats["joueurs_recalcules"] = nb_users
-            except Exception as e:
-                logger.error(f"❌ Erreur sync BDD : {e}")
-                stats["erreurs"].append(str(e))
-            finally:
-                if db:
-                    try: db.close()
-                    except Exception: pass
-
-        _derniere_mise_a_jour = datetime.utcnow().isoformat()
-        _statistiques_derniere_sync = stats
-        duree = round(time.time() - debut, 2)
-        logger.info(f"✅ Mise à jour terminée en {duree}s")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur fatale tâche quotidienne : {e}")
-        stats["erreurs"].append(f"Fatal: {str(e)}")
-        _statistiques_derniere_sync = stats
+    return _statistiques_derniere_sync
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SYNC AU LOGIN
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def sync_au_login(user_email: str, db) -> dict:
-    logger.info(f"🔌 Sync login pour : {user_email}")
-    matchs_disponibles = _matchs_en_memoire if _matchs_en_memoire else []
-    matchs_termines = [m for m in matchs_disponibles if m.get("is_finished")]
-    nb_pronos_recalcules = 0
-
-    if DB_AVAILABLE and db:
+async def sync_au_login(user_email: str, db) -> dict[str, Any]:
+    """Synchronisation temps reel declenchee par /auth/sync."""
+    async with _sync_lock:
         try:
+            stats = await _executer_sync_officielle(db)
             user = db.query(User).filter(User.email == user_email).first()
-            if user and matchs_termines:
-                nb_pronos_recalcules = _recalculer_points_tous_utilisateurs(db, matchs_termines)
-        except Exception as e:
-            logger.warning(f"Sync login erreur : {e}")
-
-    return {
-        "matchs_en_memoire": len(matchs_disponibles),
-        "matchs_termines":   len(matchs_termines),
-        "pronos_calcules":   nb_pronos_recalcules,
-        "derniere_maj":      _derniere_mise_a_jour,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  LIFECYCLE HANDLERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def startup_handler():
-    global _scheduler
-    logger.info("🚀 Démarrage du moteur de mise à jour Fantasy Boulzazen...")
-    asyncio.create_task(_premiere_sync())
-
-    if SCHEDULER_AVAILABLE:
-        _scheduler = AsyncIOScheduler(timezone="UTC")
-        _scheduler.add_job(
-            tache_mise_a_jour_quotidienne,
-            trigger=CronTrigger(hour=6, minute=0),
-            id="maj_quotidienne",
-            name="Mise à jour quotidienne WC 2026",
-            replace_existing=True,
-            max_instances=1,
-        )
-        _scheduler.start()
-        logger.info("✅ Planificateur APScheduler démarré (tâche quotidienne à 06:00 UTC)")
-    else:
-        logger.warning("⚠️ APScheduler non disponible — installez apscheduler==3.10.4")
+            return {
+                **stats,
+                "user_id": user.id if user else None,
+                "derniere_maj": _derniere_mise_a_jour,
+            }
+        except Exception as exc:
+            logger.exception("Sync officielle au login impossible pour %s", user_email)
+            _statistiques_derniere_sync["erreurs"] = [str(exc)]
+            return {
+                "matchs_scraped": 0,
+                "matchs_enregistres": 0,
+                "classements_enregistres": 0,
+                "joueurs_recalcules": 0,
+                "effectifs_nouveaux": 0,
+                "pronos_calcules": 0,
+                "derniere_maj": _derniere_mise_a_jour,
+                "erreurs": [str(exc)],
+            }
 
 
-async def _premiere_sync():
-    await asyncio.sleep(5)
-    logger.info("🔄 Première synchronisation de démarrage...")
+async def tache_mise_a_jour_quotidienne() -> None:
+    """Sync planifiee; elle utilise la meme logique que le login."""
+    db = SessionLocal()
     try:
-        await tache_mise_a_jour_quotidienne()
-    except Exception as e:
-        logger.error(f"Erreur première sync : {e}")
+        async with _sync_lock:
+            await _executer_sync_officielle(db)
+    finally:
+        db.close()
 
 
-async def shutdown_handler():
+async def startup_handler() -> None:
+    """Demarre le scheduler quotidien sans lancer de scraping concurrent au boot."""
     global _scheduler
-    if _scheduler and SCHEDULER_AVAILABLE:
+    if _scheduler:
+        return
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+    _scheduler.add_job(
+        tache_mise_a_jour_quotidienne,
+        trigger=CronTrigger(hour=6, minute=0),
+        id="maj_officielle_wc2026",
+        name="Synchronisation officielle WC 2026",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.start()
+
+
+async def shutdown_handler() -> None:
+    global _scheduler
+    if _scheduler:
         _scheduler.shutdown(wait=False)
-        logger.info("🛑 Planificateur APScheduler arrêté proprement")
+        _scheduler = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ALIAS PUBLICS — requis par main.py
-# ─────────────────────────────────────────────────────────────────────────────
-
-def start_scheduler():
-    """Alias synchrone : démarre le scheduler (appelé dans on_startup FastAPI)."""
-    loop = None
+def start_scheduler() -> None:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Contexte async (normal avec FastAPI) — créer une tâche
             asyncio.ensure_future(startup_handler())
         else:
             loop.run_until_complete(startup_handler())
     except RuntimeError:
-        # Pas de boucle active — on crée une nouvelle
         asyncio.run(startup_handler())
 
 
-def stop_scheduler():
-    """Alias synchrone : arrête le scheduler (appelé dans on_shutdown FastAPI)."""
-    global _scheduler
-    if _scheduler and SCHEDULER_AVAILABLE:
-        try:
-            _scheduler.shutdown(wait=False)
-        except Exception as e:
-            logger.warning(f"Erreur arrêt scheduler : {e}")
+def stop_scheduler() -> None:
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
 
 
-def get_scheduler_status() -> dict:
-    """Retourne l'état courant du scheduler et les stats de la dernière sync."""
+def get_scheduler_status() -> dict[str, Any]:
     return {
         **_statistiques_derniere_sync,
         "derniere_mise_a_jour": _derniere_mise_a_jour,
-        "scheduler_actif": _scheduler is not None and SCHEDULER_AVAILABLE,
-        "available": SCHEDULER_AVAILABLE,
+        "scheduler_actif": _scheduler is not None,
+        "available": True,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ACCESSEURS MÉMOIRE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_matchs_actuels() -> list:
-    """Retourne les matchs scrappés en mémoire (ou liste vide)."""
-    return _matchs_en_memoire if _matchs_en_memoire else []
+def get_matchs_actuels() -> list[dict[str, Any]]:
+    return _matchs_en_memoire
 
 
-def get_stats_sync() -> dict:
-    """Alias de get_scheduler_status pour compatibilité avec les anciens imports."""
+def get_stats_sync() -> dict[str, Any]:
     return get_scheduler_status()

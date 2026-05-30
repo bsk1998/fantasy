@@ -1,18 +1,13 @@
 """
-scraper.py — Moteur de scraping asynchrone avec Playwright + analyse Groq IA pour Fantasy Boulzazen WC 2026
-
-Sources officielles ciblées :
-  1. Scores & Calendrier  : https://www.fifa.com/fr/tournaments/mens/worldcup/canadamexicousa2026/scores-fixtures?country=DZ&wtw-filter=ALL
-  2. Classements groupes  : https://www.fifa.com/fr/tournaments/mens/worldcup/canadamexicousa2026/standings
-  3. Effectifs officiels  : https://www.olympics.com/fr/infos/coupe-du-monde-2026-composition-equipes-selections-liste-joueurs
+scraper.py — Pipeline Groq Sofascore + Olympics pour Fantasy Boulzazen WC 2026
+================================================================================
 
 Architecture :
-  - Playwright en mode headless pour charger le JavaScript et récupérer le contenu rendu
-  - Fallback sur httpx en cas d'erreur (pour légèreté)
-  - BeautifulSoup4 pour l'extraction du HTML propre
-  - Groq API (llama3-8b-8192) pour structurer les données en JSON propre
-  - Cache intégré avec TTL pour éviter les requêtes excessives
-  - Fallback sur les données statiques si le scraping échoue complètement
+  1. Playwright (async) pour charger JS → HTML complet
+  2. Fallback httpx + BeautifulSoup si Playwright échoue
+  3. Groq IA pour structurer le texte brut en JSON propre
+  4. Synchronisation BDD atomique via _sync_to_db()
+  5. Cache intelligent avec versioning pour le frontend
 """
 
 import asyncio
@@ -21,49 +16,49 @@ import json
 import os
 import time
 import re
+import hashlib
 from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta
 
 logger = logging.getLogger("fantasy_scraper")
 
-# ── Tentative d'import des dépendances optionnelles ─────────────────────────
+# ── Imports optionnels ────────────────────────────────────────────────────────
 try:
     from playwright.async_api import async_playwright, Browser, Page
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    logger.warning("playwright non installé — pip install playwright")
+    logger.warning("⚠️  Playwright non installé — pip install playwright")
     PLAYWRIGHT_AVAILABLE = False
 
 try:
     import httpx
     HTTPX_AVAILABLE = True
 except ImportError:
-    logger.warning("httpx non installé — pip install httpx")
+    logger.warning("⚠️  httpx non installé — pip install httpx")
     HTTPX_AVAILABLE = False
 
 try:
     from bs4 import BeautifulSoup
     BS4_AVAILABLE = True
 except ImportError:
-    logger.warning("beautifulsoup4 non installé — pip install beautifulsoup4")
+    logger.warning("⚠️  BeautifulSoup4 non installé — pip install beautifulsoup4")
     BS4_AVAILABLE = False
 
 try:
     from groq import Groq
     GROQ_AVAILABLE = True
 except ImportError:
-    logger.warning("groq non installé — pip install groq")
+    logger.warning("⚠️  Groq non installé — pip install groq")
     GROQ_AVAILABLE = False
 
-# ── Configuration ─────────────────────────��───────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = "llama3-8b-8192"
 
 # URLs sources officielles
-URL_FIFA_FIXTURES = "https://www.fifa.com/fr/tournaments/mens/worldcup/canadamexicousa2026/scores-fixtures?country=DZ&wtw-filter=ALL"
-URL_FIFA_STANDINGS = "https://www.fifa.com/fr/tournaments/mens/worldcup/canadamexicousa2026/standings"
-URL_OLYMPICS_SQUADS = "https://www.olympics.com/fr/infos/coupe-du-monde-2026-composition-equipes-selections-liste-joueurs"
+URL_SOFASCORE = "https://www.sofascore.com/fr/football/tournament/world/world-championship/16#id:58210"
+URL_OLYMPICS = "https://www.olympics.com/fr/infos/coupe-du-monde-2026-composition-equipes-selections-liste-joueurs"
 
-# Headers HTTP pour simuler un navigateur réel
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -74,17 +69,24 @@ HTTP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# Cache simple en mémoire {clé: (timestamp, données)}
+# Cache en mémoire {key: (timestamp, data)}
 _cache: Dict[str, tuple] = {}
-CACHE_TTL_SECONDS = 3600  # 1 heure
+CACHE_TTL_SECONDS = 900  # 15 minutes
 
-# Singleton pour le navigateur Playwright
+# Singleton Playwright
 _playwright_browser: Optional[Browser] = None
 
+# Métadonnées de scraping
+_scraping_status = {
+    "sofascore": {"last_at": None, "status": "pending", "items": 0, "error": None},
+    "olympics": {"last_at": None, "status": "pending", "items": 0, "error": None},
+    "data_version_hash": None,
+}
 
-# ────────────────────────────────────────────────────────────────────────────
-#  GESTION DU NAVIGATEUR PLAYWRIGHT
-# ────────────────────────────────────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  GESTION NAVIGATEUR PLAYWRIGHT
+# ════════════════════════════════════════════════════════════════════════════════
 
 async def _get_playwright_browser() -> Optional[Browser]:
     """Initialise ou retourne le navigateur Playwright singleton."""
@@ -96,16 +98,16 @@ async def _get_playwright_browser() -> Optional[Browser]:
         try:
             playwright = await async_playwright().start()
             _playwright_browser = await playwright.chromium.launch(headless=True)
-            logger.info("✅ Navigateur Playwright initialisé (headless mode)")
+            logger.info("✅ Navigateur Playwright initialisé (headless)")
         except Exception as e:
-            logger.error(f"❌ Impossible d'initialiser Playwright : {e}")
+            logger.error(f"❌ Erreur Playwright : {e}")
             return None
     
     return _playwright_browser
 
 
 async def _close_playwright_browser() -> None:
-    """Ferme le navigateur Playwright singleton."""
+    """Ferme le navigateur Playwright."""
     global _playwright_browser
     if _playwright_browser:
         try:
@@ -113,61 +115,30 @@ async def _close_playwright_browser() -> None:
             _playwright_browser = None
             logger.info("✅ Navigateur Playwright fermé")
         except Exception as e:
-            logger.error(f"⚠️ Erreur lors de la fermeture du navigateur : {e}")
+            logger.error(f"⚠️  Erreur fermeture Playwright : {e}")
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  UTILITAIRES CACHE
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  RÉCUPÉRATION HTML
+# ════════════════════════════════════════════════════════════════════════════════
 
-def _cache_get(key: str) -> Optional[Any]:
-    """Retourne les données en cache si elles ne sont pas expirées."""
-    if key in _cache:
-        ts, data = _cache[key]
-        if time.time() - ts < CACHE_TTL_SECONDS:
-            return data
-        del _cache[key]
-    return None
-
-
-def _cache_set(key: str, data: Any) -> None:
-    """Stocke des données dans le cache avec un timestamp."""
-    _cache[key] = (time.time(), data)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  REQUÊTES AVEC PLAYWRIGHT + FALLBACK HTTPX
-# ────────────────────────────────────────────────────────────────────────────
-
-async def _fetch_url_playwright(url: str, timeout: int = 30000) -> Optional[str]:
-    """
-    Récupère le contenu HTML d'une URL avec Playwright (JS rendu).
-    Retourne le texte HTML ou None en cas d'échec.
-    timeout en millisecondes.
-    """
+async def _fetch_url_playwright(url: str, timeout_ms: int = 35000) -> Optional[str]:
+    """Récupère HTML avec Playwright (JS rendu)."""
     browser = await _get_playwright_browser()
     if not browser:
-        logger.warning(f"Playwright non disponible pour : {url}")
         return None
 
     page = None
     try:
         page = await browser.new_page()
         await page.set_extra_http_headers(HTTP_HEADERS)
-        
-        # Naviguer vers l'URL avec attente du chargement complet
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
-        
-        # Attendre un peu supplémentaire pour les scripts asynchrones
-        await asyncio.sleep(2)
-        
-        # Extraire le contenu HTML rendu
+        await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+        await asyncio.sleep(2)  # Attendre scripts async
         html = await page.content()
-        logger.info(f"✅ Scraping Playwright réussi : {url[:60]}...")
+        logger.info(f"✅ Playwright: {url[:50]}...")
         return html
-
     except Exception as e:
-        logger.warning(f"⚠️ Erreur Playwright pour {url[:60]}... : {e}")
+        logger.warning(f"⚠️  Playwright échoue: {e}")
         return None
     finally:
         if page:
@@ -178,12 +149,8 @@ async def _fetch_url_playwright(url: str, timeout: int = 30000) -> Optional[str]
 
 
 async def _fetch_url_httpx(url: str, timeout: int = 20) -> Optional[str]:
-    """
-    Fallback : Récupère le contenu HTML d'une URL avec httpx (sans JS).
-    Retourne le texte HTML ou None en cas d'échec.
-    """
+    """Fallback httpx (sans JS)."""
     if not HTTPX_AVAILABLE:
-        logger.warning(f"httpx non disponible, impossible de fallback : {url}")
         return None
 
     try:
@@ -191,87 +158,52 @@ async def _fetch_url_httpx(url: str, timeout: int = 20) -> Optional[str]:
             headers=HTTP_HEADERS,
             timeout=timeout,
             follow_redirects=True,
-            verify=True,
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
-            logger.info(f"✅ Scraping httpx réussi (fallback) : {url[:60]}...")
+            logger.info(f"✅ httpx: {url[:50]}...")
             return response.text
-
-    except httpx.TimeoutException:
-        logger.warning(f"⏰ Timeout httpx lors du scraping de : {url}")
-    except httpx.HTTPStatusError as e:
-        logger.warning(f"⚠️ Erreur HTTP {e.response.status_code} pour : {url}")
     except Exception as e:
-        logger.error(f"❌ Erreur httpx inattendue pour {url} : {e}")
+        logger.warning(f"⚠️  httpx échoue: {e}")
+        return None
 
-    return None
 
-
-async def _fetch_url(url: str, timeout: int = 30) -> Optional[str]:
-    """
-    Récupère le contenu HTML d'une URL en priorité avec Playwright, 
-    fallback sur httpx en cas d'erreur.
-    """
-    # Essayer Playwright en premier
-    html = await _fetch_url_playwright(url, timeout=timeout * 1000)
+async def _fetch_url(url: str) -> Optional[str]:
+    """Récupère HTML : Playwright → httpx fallback."""
+    html = await _fetch_url_playwright(url)
     if html:
         return html
-
-    # Fallback sur httpx
-    logger.info(f"🔄 Fallback sur httpx pour : {url[:60]}...")
-    return await _fetch_url_httpx(url, timeout=timeout)
+    logger.info(f"🔄 Fallback httpx pour : {url[:50]}...")
+    return await _fetch_url_httpx(url)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  NETTOYAGE ET EXTRACTION HTML
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  NETTOYAGE HTML
+# ════════════════════════════════════════════════════════════════════════════════
 
-def _nettoyer_html(html: str, selecteur_principal: Optional[str] = None) -> str:
-    """
-    Nettoie le HTML brut pour n'extraire que le texte utile.
-    Optionnellement cible un sélecteur CSS spécifique.
-    """
+def _nettoyer_html(html: str) -> str:
+    """Extrait le texte utile du HTML."""
     if not BS4_AVAILABLE:
-        return html[:3000]  # Fallback : retourne les 3000 premiers chars
+        return html[:4000]
 
     soup = BeautifulSoup(html, "html.parser")
-
-    # Supprimer les éléments inutiles
-    for tag in soup(["script", "style", "nav", "footer", "head",
-                     "iframe", "noscript", "svg", "img", "meta", "link"]):
+    
+    for tag in soup(["script", "style", "nav", "footer", "head", "iframe", "noscript"]):
         tag.decompose()
 
-    # Cibler une section spécifique si demandé
-    if selecteur_principal:
-        cible = soup.select_one(selecteur_principal)
-        if cible:
-            texte = cible.get_text(separator="\n", strip=True)
-        else:
-            texte = soup.get_text(separator="\n", strip=True)
-    else:
-        texte = soup.get_text(separator="\n", strip=True)
-
-    # Compresser les lignes vides multiples
+    texte = soup.get_text(separator="\n", strip=True)
     lignes = [l for l in texte.splitlines() if l.strip()]
-    return "\n".join(lignes)[:4000]  # Limiter à 4000 chars pour Groq
+    return "\n".join(lignes)[:4000]
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  ANALYSE PAR GROQ IA
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  APPELS GROQ IA
+# ════════════════════════════════════════════════════════════════════════════════
 
-def _appeler_groq(
-    prompt_systeme: str, 
-    contenu: str, 
-    max_tokens: int = 2000
-) -> Optional[Dict[str, Any]]:
-    """
-    Envoie du texte brut à l'IA Groq pour extraction et structuration JSON.
-    Retourne un dict Python ou None si l'appel échoue.
-    """
+def _appeler_groq(prompt_systeme: str, contenu: str, max_tokens: int = 2000) -> Optional[Dict[str, Any]]:
+    """Envoie du texte à Groq pour extraction JSON."""
     if not GROQ_AVAILABLE or not GROQ_API_KEY:
-        logger.warning("Groq non disponible ou clé API absente")
+        logger.warning("⚠️  Groq non disponible")
         return None
 
     try:
@@ -283,452 +215,339 @@ def _appeler_groq(
                 {"role": "user", "content": contenu},
             ],
             max_tokens=max_tokens,
-            temperature=0.1,  # Très déterministe pour l'extraction de données
+            temperature=0.1,
         )
         texte_reponse = completion.choices[0].message.content
-
-        # Extraire le JSON de la réponse (il peut être entouré de texte)
         match = re.search(r'\{[\s\S]*\}|\[[\s\S]*\]', texte_reponse)
         if match:
             return json.loads(match.group(0))
         else:
-            logger.warning("Groq n'a pas retourné de JSON valide")
+            logger.warning("❌ Groq n'a pas retourné de JSON valide")
             return None
-
     except json.JSONDecodeError as e:
-        logger.error(f"Erreur de parsing JSON Groq : {e}")
+        logger.error(f"❌ Erreur parsing JSON Groq : {e}")
     except Exception as e:
-        logger.error(f"Erreur appel Groq : {e}")
-
+        logger.error(f"❌ Erreur appel Groq : {e}")
+    
     return None
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  SCRAPING : SCORES & CALENDRIER FIFA
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  SCRAPING SOFASCORE
+# ══════════════��═════════════════════════════════════════════════════════════════
 
-PROMPT_SYSTEME_SCORES = """Tu es un extracteur de données sportives spécialisé en football.
-Analyse le texte d'une page web FIFA et extrais les matchs de la Coupe du Monde 2026.
-Retourne UNIQUEMENT un JSON valide (pas de texte autour) avec cette structure :
+PROMPT_SOFASCORE = """Tu es un extracteur de données football expert. Analyse ce contenu HTML/texte de Sofascore
+et extrais TOUTES les données disponibles au format JSON strict suivant (UNIQUEMENT le JSON, sans texte autour) :
 {
-  "matchs": [
-    {
-      "id": 1,
-      "home": "Nom équipe domicile",
-      "away": "Nom équipe extérieure",
-      "group": "Groupe X ou Phase",
-      "date": "YYYY-MM-DD",
-      "home_score": null,
-      "away_score": null,
-      "is_finished": false,
-      "is_locked": false
-    }
-  ]
-}
-Pour les matchs terminés, remplis home_score, away_score et mets is_finished=true.
-Si le score n'est pas disponible, mets null.
-Extrais TOUS les matchs visibles. Maximum 100 matchs."""
-
-
-async def scraper_scores_fifa() -> List[Dict[str, Any]]:
-    """
-    Scrape le calendrier et les scores depuis la page FIFA officielle.
-    Retourne une liste de matchs structurés.
-    """
-    cache_key = "fifa_scores"
-    cached = _cache_get(cache_key)
-    if cached:
-        logger.info("✅ Scores FIFA récupérés depuis le cache")
-        return cached
-
-    logger.info("🌐 Scraping des scores FIFA en cours...")
-    html = await _fetch_url(URL_FIFA_FIXTURES, timeout=35)
-
-    if not html:
-        logger.warning("⚠️ Impossible de scraper FIFA, retour aux données statiques")
-        return _get_matchs_statiques()
-
-    texte_propre = _nettoyer_html(html, selecteur_principal="main")
-    resultat = _appeler_groq(PROMPT_SYSTEME_SCORES, texte_propre, max_tokens=3000)
-
-    if resultat and isinstance(resultat.get("matchs"), list):
-        matchs = resultat["matchs"]
-        _cache_set(cache_key, matchs)
-        logger.info(f"✅ {len(matchs)} matchs extraits via Groq IA")
-        return matchs
-    else:
-        logger.warning("⚠️ Groq n'a pas pu extraire les matchs, retour statique")
-        return _get_matchs_statiques()
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  SCRAPING : CLASSEMENTS FIFA
-# ────────────────────────────────────────────────────────────────────────────
-
-PROMPT_SYSTEME_STANDINGS = """Tu es un extracteur de données sportives.
-Analyse le texte d'une page web FIFA et extrais les classements des groupes.
-Retourne UNIQUEMENT un JSON valide avec cette structure :
-{
-  "groupes": {
-    "Groupe A": [
-      {"equipe": "Nom", "points": 9, "joues": 3, "gagnes": 3, "nuls": 0, "perdus": 0, "buts_pour": 8, "buts_contre": 2, "diff": 6}
-    ]
+  "matches": [{
+    "id": "string_unique",
+    "home": "Nom équipe domicile",
+    "away": "Nom équipe extérieure",
+    "group": "Groupe A|B|C|etc (null si phase élim)",
+    "round": "group_stage|r16|qf|sf|third_place|final",
+    "date": "YYYY-MM-DD",
+    "kickoff_utc": "ISO8601",
+    "home_score": "int|null",
+    "away_score": "int|null",
+    "status": "scheduled|live|finished",
+    "player_stats": [{
+      "player_name": "Nom",
+      "team": "Équipe",
+      "goals": "int",
+      "assists": "int",
+      "yellow_cards": "int",
+      "red_cards": "int",
+      "minutes_played": "int",
+      "saves": "int|null",
+      "ball_recoveries": "int|null",
+      "clean_sheet": "bool|null"
+    }]
+  }],
+  "group_standings": {
+    "Groupe A": [{
+      "team": "Pays",
+      "played": "int",
+      "won": "int",
+      "drawn": "int",
+      "lost": "int",
+      "goals_for": "int",
+      "goals_against": "int",
+      "goal_diff": "int",
+      "points": "int"
+    }]
   }
 }
-Extrais tous les groupes visibles."""
+Retourne UNIQUEMENT le JSON valide."""
 
 
-async def scraper_classements_fifa() -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Scrape les classements de groupes depuis la page FIFA.
-    Retourne un dict {groupe: [équipes triées]}.
-    """
-    cache_key = "fifa_standings"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
+async def scraper_sofascore() -> Dict[str, Any]:
+    """Scrape Sofascore pour matchs et classements."""
+    logger.info("🌐 Scraping Sofascore en cours...")
+    
+    cache_key = "sofascore_data"
+    cached = _cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < CACHE_TTL_SECONDS:
+        logger.info("✅ Sofascore depuis cache")
+        return cached[1]
 
-    logger.info("🌐 Scraping des classements FIFA en cours...")
-    html = await _fetch_url(URL_FIFA_STANDINGS, timeout=35)
-
+    html = await _fetch_url(URL_SOFASCORE)
     if not html:
+        logger.warning("⚠️  Sofascore inaccessible")
         return {}
 
     texte_propre = _nettoyer_html(html)
-    resultat = _appeler_groq(PROMPT_SYSTEME_STANDINGS, texte_propre)
+    resultat = _appeler_groq(PROMPT_SOFASCORE, texte_propre, max_tokens=3500)
 
-    if resultat and "groupes" in resultat:
-        groupes = resultat["groupes"]
-        _cache_set(cache_key, groupes)
-        logger.info(f"✅ Classements extraits pour {len(groupes)} groupes")
-        return groupes
+    if resultat:
+        _cache[cache_key] = (time.time(), resultat)
+        _scraping_status["sofascore"]["items"] = len(resultat.get("matches", []))
+        logger.info(f"✅ Sofascore: {_scraping_status['sofascore']['items']} matchs")
+        return resultat
 
     return {}
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  SCRAPING : EFFECTIFS OLYMPICS
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  SCRAPING OLYMPICS (EFFECTIFS)
+# ════════════════════════════════════════════════════════════════════════════════
 
-PROMPT_SYSTEME_SQUADS = """Tu es un extracteur de données footballistiques expert.
-Analyse le texte d'une page web Olympics sur les effectifs de la Coupe du Monde 2026.
-RÈGLE CRITIQUE : N'extrais QUE les équipes qui ont officiellement publié leur liste définitive COMPLÈTE.
-Pour chaque équipe listée, vérifie que la liste complète est disponible avant de l'inclure.
-Retourne UNIQUEMENT un JSON valide avec cette structure :
+PROMPT_OLYMPICS = """Tu es un extracteur d'effectifs de football expert. Analyse ce contenu HTML/texte
+et extrais pour chaque nation dont la liste est visible (UNIQUEMENT le JSON, pas de texte) :
 {
-  "equipes_publiees": [
-    {
-      "nation": "Nom du pays en français",
-      "entraineur": "Nom Prénom",
-      "joueurs": [
-        {
-          "nom": "Prénom Nom",
-          "poste": "G" ou "D" ou "M" ou "A",
-          "club": "Nom du club",
-          "numero": 1
-        }
-      ]
-    }
-  ]
+  "squads": [{
+    "nation": "Nom du pays en français",
+    "squad_status": "definitive|provisoire|non_publiee",
+    "is_locked": "bool (true si non_publiee ou provisoire)",
+    "coach_name": "Nom Prénom|null",
+    "players": [{
+      "name": "Prénom Nom",
+      "position": "G|D|M|A",
+      "club": "Nom club|null",
+      "number": "int|null"
+    }]
+  }]
 }
-Si une équipe n'a pas encore publié sa liste définitive, NE PAS l'inclure du tout.
-Maximum 15 équipes pour rester dans les limites du contexte."""
+RÈGLE CRITIQUE : n'inclure une nation que si au moins UN joueur est lisible dans le texte.
+Retourne UNIQUEMENT le JSON valide."""
 
 
 async def scraper_effectifs_olympics() -> List[Dict[str, Any]]:
-    """
-    Scrape les effectifs officiels depuis la page Olympics.
-    RÈGLE : Ne retourne que les équipes avec liste définitive publiée.
-    """
+    """Scrape Olympics pour effectifs officiels."""
+    logger.info("🌐 Scraping Olympics (effectifs) en cours...")
+    
     cache_key = "olympics_squads"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
+    cached = _cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < CACHE_TTL_SECONDS:
+        logger.info("✅ Olympics depuis cache")
+        return cached[1]
 
-    logger.info("🌐 Scraping des effectifs Olympics en cours...")
-    html = await _fetch_url(URL_OLYMPICS_SQUADS, timeout=40)
-
+    html = await _fetch_url(URL_OLYMPICS)
     if not html:
-        logger.warning("⚠️ Page Olympics inaccessible")
+        logger.warning("⚠️  Olympics inaccessible")
         return []
 
     texte_propre = _nettoyer_html(html)
-    resultat = _appeler_groq(PROMPT_SYSTEME_SQUADS, texte_propre, max_tokens=3000)
+    resultat = _appeler_groq(PROMPT_OLYMPICS, texte_propre, max_tokens=3000)
 
-    if resultat and isinstance(resultat.get("equipes_publiees"), list):
-        equipes = resultat["equipes_publiees"]
-        _cache_set(cache_key, equipes)
-        logger.info(f"✅ {len(equipes)} effectifs officiels extraits via Groq IA")
-        return equipes
+    if resultat and isinstance(resultat.get("squads"), list):
+        squads = resultat["squads"]
+        _cache[cache_key] = (time.time(), squads)
+        _scraping_status["olympics"]["items"] = len(squads)
+        logger.info(f"✅ Olympics: {len(squads)} effectifs")
+        return squads
 
     return []
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  DÉTECTION DES NOUVELLES LISTES PUBLIÉES
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════════
+#  SYNCHRONISATION BDD
+# ════════════════════════════════════════════════════════════════════════════════
 
-PROMPT_SYSTEME_DETECTION = """Tu es un détecteur de nouvelles publications d'effectifs footballistiques.
-Analyse ce texte et identifie UNIQUEMENT les nations pour lesquelles une liste définitive
-complète de joueurs pour la Coupe du Monde 2026 a été officiellement publiée sur Olympics.
-Retourne UNIQUEMENT un JSON valide :
-{
-  "nations_avec_liste_definitive": ["France", "Espagne", "Brésil"]
-}
-Si aucune liste n'est clairement identifiée, retourne une liste vide.
-Les noms de pays doivent être en français."""
+async def _sync_to_db(sofascore_data: Dict, olympics_data: List, db) -> None:
+    """Synchronise les données scrappées dans la BD de manière atomique."""
+    from app.models import MatchResult, Player, Coach, TeamNation, GroupStanding, ScrapingMetadata
+    from sqlalchemy import delete
+    
+    logger.info("🔄 Synchronisation BDD en cours...")
+    
+    try:
+        # ── Synchroniser matchs Sofascore ──
+        if sofascore_data.get("matches"):
+            for match_data in sofascore_data["matches"]:
+                match = db.query(MatchResult).filter(
+                    MatchResult.sofascore_id == match_data["id"]
+                ).first()
+                
+                if not match:
+                    match = MatchResult(sofascore_id=match_data["id"])
+                    db.add(match)
+                
+                match.home = match_data.get("home")
+                match.away = match_data.get("away")
+                match.group = match_data.get("group")
+                match.round = match_data.get("round", "group_stage")
+                match.date = match_data.get("date")
+                match.kickoff_utc = match_data.get("kickoff_utc")
+                match.home_score = match_data.get("home_score")
+                match.away_score = match_data.get("away_score")
+                match.status = match_data.get("status", "scheduled")
+                match.player_stats = match_data.get("player_stats", {})
+                match.last_updated = datetime.utcnow().isoformat()
 
+        # ── Synchroniser classements groupes ──
+        if sofascore_data.get("group_standings"):
+            for group_name, standings in sofascore_data["group_standings"].items():
+                for team_data in standings:
+                    standing = db.query(GroupStanding).filter(
+                        GroupStanding.group_name == group_name,
+                        GroupStanding.team == team_data.get("team")
+                    ).first()
+                    
+                    if not standing:
+                        standing = GroupStanding(
+                            group_name=group_name,
+                            team=team_data.get("team")
+                        )
+                        db.add(standing)
+                    
+                    standing.played = team_data.get("played", 0)
+                    standing.won = team_data.get("won", 0)
+                    standing.drawn = team_data.get("drawn", 0)
+                    standing.lost = team_data.get("lost", 0)
+                    standing.goals_for = team_data.get("goals_for", 0)
+                    standing.goals_against = team_data.get("goals_against", 0)
+                    standing.goal_diff = team_data.get("goal_diff", 0)
+                    standing.points = team_data.get("points", 0)
+                    standing.last_updated = datetime.utcnow().isoformat()
 
-async def detecter_nouvelles_listes() -> List[str]:
-    """
-    Détecte dynamiquement quelles équipes ont publié leur liste définitive.
-    Utilisé par updater.py pour savoir quoi mettre à jour.
-    """
-    logger.info("🔍 Détection des nouvelles listes définitives...")
-    html = await _fetch_url(URL_OLYMPICS_SQUADS, timeout=40)
+        # ── Synchroniser effectifs Olympics ──
+        for squad_data in olympics_data:
+            nation = squad_data.get("nation")
+            
+            team_nation = db.query(TeamNation).filter(
+                TeamNation.name == nation
+            ).first()
+            
+            if not team_nation:
+                team_nation = TeamNation(name=nation)
+                db.add(team_nation)
+            
+            squad_status = squad_data.get("squad_status", "non_publiee")
+            team_nation.squad_status = squad_status
+            team_nation.is_locked = squad_data.get("is_locked", True)
+            team_nation.coach_name = squad_data.get("coach_name")
+            team_nation.last_updated = datetime.utcnow().isoformat()
+            
+            if squad_status == "definitive":
+                team_nation.squad_published_at = datetime.utcnow().isoformat()
+            
+            db.flush()  # Créer team_nation.id si nouveau
+            
+            # ── Synchroniser joueurs ──
+            # Supprimer les anciens joueurs si changement de statut
+            if squad_status == "definitive":
+                db.query(Player).filter(Player.team_id == team_nation.id).delete()
+            
+            for player_data in squad_data.get("players", []):
+                player = db.query(Player).filter(
+                    Player.name == player_data.get("name"),
+                    Player.team_id == team_nation.id
+                ).first()
+                
+                if not player:
+                    player = Player(
+                        name=player_data.get("name"),
+                        team_id=team_nation.id
+                    )
+                    db.add(player)
+                
+                player.position = player_data.get("position", "M")
+                player.nationality = nation
+                player.is_confirmed = True
+                player.price = _estimer_prix(player_data.get("position", "M"))
+                player.last_stat_update = datetime.utcnow().isoformat()
 
-    if not html:
-        return []
+        # ── Mettre à jour métadonnées ──
+        for source in ["sofascore", "olympics"]:
+            metadata = db.query(ScrapingMetadata).filter(
+                ScrapingMetadata.source == source
+            ).first()
+            
+            if not metadata:
+                metadata = ScrapingMetadata(source=source)
+                db.add(metadata)
+            
+            metadata.last_scrape_at = datetime.utcnow().isoformat()
+            metadata.last_success_at = datetime.utcnow().isoformat()
+            metadata.status = "success"
+            metadata.items_scraped = _scraping_status[source]["items"]
+            metadata.data_version_hash = _compute_data_version_hash(db)
 
-    texte_propre = _nettoyer_html(html)
-    resultat = _appeler_groq(PROMPT_SYSTEME_DETECTION, texte_propre, max_tokens=500)
+        db.commit()
+        logger.info("✅ Synchronisation BDD réussie")
 
-    if resultat and isinstance(resultat.get("nations_avec_liste_definitive"), list):
-        nations = resultat["nations_avec_liste_definitive"]
-        logger.info(f"✅ Nations avec liste publiée : {nations}")
-        return nations
-
-    return []
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  CONVERSION EFFECTIF OLYMPICS → FORMAT BASE DE DONNÉES
-# ────────────────────────────────────────────────────────────────────────────
-
-# Table de conversion des postes (depuis différentes notations)
-_POSTE_MAP = {
-    "gardien": "G",
-    "goalkeeper": "G",
-    "gk": "G",
-    "g": "G",
-    "défenseur": "D",
-    "defender": "D",
-    "def": "D",
-    "d": "D",
-    "milieu": "M",
-    "midfielder": "M",
-    "mid": "M",
-    "m": "M",
-    "attaquant": "A",
-    "forward": "A",
-    "att": "A",
-    "a": "A",
-    "ailier": "A",
-    "striker": "A",
-    "winger": "A",
-}
-
-
-def _normaliser_poste(poste_brut: str) -> str:
-    """Normalise un poste dans le format G/D/M/A."""
-    if not poste_brut:
-        return "M"  # Défaut
-    p = poste_brut.lower().strip()
-    return _POSTE_MAP.get(p, p.upper()[:1] if p else "M")
-
-
-# Compteur global d'ID pour les joueurs scrappés
-_JOUEUR_ID_COUNTER = 9000
-
-
-def convertir_effectif_pour_db(equipe_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convertit un effectif extrait par Groq IA en format compatible
-    avec le modèle Player de notre base de données.
-    """
-    global _JOUEUR_ID_COUNTER
-
-    nation = equipe_data.get("nation", "Inconnu")
-    entraineur = equipe_data.get("entraineur", "")
-    joueurs_bruts = equipe_data.get("joueurs", [])
-
-    joueurs_formatés = []
-    for j in joueurs_bruts:
-        _JOUEUR_ID_COUNTER += 1
-        joueurs_formatés.append({
-            "id": _JOUEUR_ID_COUNTER,
-            "name": j.get("nom", "Joueur inconnu"),
-            "position": _normaliser_poste(j.get("poste", "M")),
-            "nationality": nation,
-            "price": _estimer_prix(j.get("poste", "M")),
-            "goals": 0,
-            "assists": 0,
-            "points_total": 0,
-            "is_confirmed": True,  # Car liste officielle publiée
-            "team": nation,
-            "club": j.get("club", ""),
-            "numero": j.get("numero", 0),
-        })
-
-    return {
-        "nation": nation,
-        "entraineur": entraineur,
-        "joueurs": joueurs_formatés,
-        "is_definitive": True,
-    }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erreur sync BDD : {e}")
+        raise
 
 
 def _estimer_prix(poste: str) -> float:
-    """Attribue un prix Fantasy par défaut selon le poste."""
-    poste_norm = _normaliser_poste(poste)
-    prix_defaut = {"G": 5.5, "D": 6.0, "M": 7.0, "A": 7.5}
-    return prix_defaut.get(poste_norm, 6.0)
+    """Estime le prix Fantasy par poste."""
+    poste_norm = poste.upper() if poste else "M"
+    prix = {"G": 5.5, "D": 6.0, "M": 7.0, "A": 7.5}
+    return prix.get(poste_norm, 6.0)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  DONNÉES STATIQUES DE FALLBACK
-# ────────────────────────────────────────────────────────────────────────────
-
-_STATIC_SQUADS = {
-    "France": [
-        {"id": 101, "name": "M. Maignan", "position": "G", "nationality": "Française", "price": 7.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 102, "name": "W. Saliba", "position": "D", "nationality": "Française", "price": 9.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 103, "name": "T. Hernandez", "position": "D", "nationality": "Française", "price": 9.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 104, "name": "N. Tchouaméni", "position": "M", "nationality": "Française", "price": 9.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 105, "name": "A. Griezmann", "position": "M", "nationality": "Française", "price": 11.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 106, "name": "K. Mbappé", "position": "A", "nationality": "Française", "price": 18.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 107, "name": "O. Dembélé", "position": "A", "nationality": "Française", "price": 10.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Argentine": [
-        {"id": 201, "name": "E. Martínez", "position": "G", "nationality": "Argentine", "price": 9.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 202, "name": "C. Romero", "position": "D", "nationality": "Argentine", "price": 8.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 203, "name": "E. Fernández", "position": "M", "nationality": "Argentine", "price": 9.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 204, "name": "L. Messi", "position": "A", "nationality": "Argentine", "price": 16.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 205, "name": "J. Álvarez", "position": "A", "nationality": "Argentine", "price": 11.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Brésil": [
-        {"id": 301, "name": "Alisson", "position": "G", "nationality": "Brésilienne", "price": 8.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 302, "name": "Marquinhos", "position": "D", "nationality": "Brésilienne", "price": 8.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 303, "name": "Vini Jr.", "position": "A", "nationality": "Brésilienne", "price": 16.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 304, "name": "Rodrygo", "position": "A", "nationality": "Brésilienne", "price": 11.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Angleterre": [
-        {"id": 401, "name": "J. Pickford", "position": "G", "nationality": "Anglaise", "price": 7.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 402, "name": "J. Bellingham", "position": "M", "nationality": "Anglaise", "price": 14.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 403, "name": "H. Kane", "position": "A", "nationality": "Anglaise", "price": 13.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 404, "name": "B. Saka", "position": "A", "nationality": "Anglaise", "price": 11.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Espagne": [
-        {"id": 501, "name": "U. Simón", "position": "G", "nationality": "Espagnole", "price": 7.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 502, "name": "L. Yamal", "position": "A", "nationality": "Espagnole", "price": 13.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 503, "name": "P. Gavi", "position": "M", "nationality": "Espagnole", "price": 10.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Algérie": [
-        {"id": 901, "name": "R. M'Bolhi", "position": "G", "nationality": "Algérienne", "price": 5.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 902, "name": "A. Mandi", "position": "D", "nationality": "Algérienne", "price": 7.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 903, "name": "H. Bennacer", "position": "M", "nationality": "Algérienne", "price": 10.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 904, "name": "A. Mahrez", "position": "A", "nationality": "Algérienne", "price": 11.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Maroc": [
-        {"id": 801, "name": "Y. Bounou", "position": "G", "nationality": "Marocaine", "price": 8.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 802, "name": "A. Hakimi", "position": "D", "nationality": "Marocaine", "price": 11.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 803, "name": "Y. En-Nesyri", "position": "A", "nationality": "Marocaine", "price": 10.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-    "Sénégal": [
-        {"id": 1001, "name": "E. Mendy", "position": "G", "nationality": "Sénégalaise", "price": 8.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 1002, "name": "K. Koulibaly", "position": "D", "nationality": "Sénégalaise", "price": 8.5, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-        {"id": 1003, "name": "S. Mané", "position": "A", "nationality": "Sénégalaise", "price": 12.0, "goals": 0, "assists": 0, "points_total": 0, "is_confirmed": True},
-    ],
-}
+def _compute_data_version_hash(db) -> str:
+    """Calcule un hash pour invalider le cache client si les données changent."""
+    from app.models import Player, MatchResult, TeamNation
+    
+    players_count = db.query(Player).count()
+    matches_count = db.query(MatchResult).count()
+    teams_count = db.query(TeamNation).count()
+    
+    data_str = f"{players_count}_{matches_count}_{teams_count}"
+    return hashlib.md5(data_str.encode()).hexdigest()[:8]
 
 
-def _get_matchs_statiques() -> List[Dict[str, Any]]:
-    """Retourne les matchs de la phase de groupes codés en dur (fallback)."""
-    return [
-        {"id": 1, "home": "USA", "away": "Canada", "group": "Groupe A", "date": "2026-06-11", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 2, "home": "Mexique", "away": "Jamaïque", "group": "Groupe A", "date": "2026-06-11", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 3, "home": "France", "away": "Belgique", "group": "Groupe B", "date": "2026-06-12", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 4, "home": "Maroc", "away": "Tunisie", "group": "Groupe B", "date": "2026-06-12", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 5, "home": "Brésil", "away": "Argentine", "group": "Groupe C", "date": "2026-06-13", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 6, "home": "Angleterre", "away": "Allemagne", "group": "Groupe D", "date": "2026-06-13", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 7, "home": "Espagne", "away": "Portugal", "group": "Groupe E", "date": "2026-06-14", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-        {"id": 8, "home": "Sénégal", "away": "Algérie", "group": "Groupe G", "date": "2026-06-15", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
-    ]
+# ════════════════════════════════════════════════════════════════════════════════
+#  ORCHESTRATEUR
+# ════════════════════════════════════════════════════════════════════════════════
+
+async def scraping_complet(db=None) -> Dict[str, Any]:
+    """Lance le scraping complet de toutes les sources."""
+    logger.info("🚀 Scraping complet lancé...")
+    
+    try:
+        # Récupérer les données
+        sofascore_data = await scraper_sofascore()
+        olympics_data = await scraper_effectifs_olympics()
+        
+        # Synchroniser en BD si session fournie
+        if db:
+            await _sync_to_db(sofascore_data, olympics_data, db)
+        
+        return {
+            "sofascore": sofascore_data,
+            "olympics": olympics_data,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur scraping complet : {e}")
+        return {}
 
 
-def get_all_players_market() -> List[Dict[str, Any]]:
-    """
-    Retourne tous les joueurs du marché Fantasy.
-    Utilise les données statiques intégrées (fallback immédiat).
-    """
-    all_players = []
-    seen_names = set()
-    for team_name, squad in _STATIC_SQUADS.items():
-        for player in squad:
-            name_key = player["name"].lower().strip()
-            if name_key not in seen_names:
-                seen_names.add(name_key)
-                all_players.append({**player, "team": team_name})
-    logger.info(f"📊 Marché Fantasy : {len(all_players)} joueurs disponibles")
-    return all_players
-
-
-def recuperer_effectif_web(team_name: str) -> Optional[List[Dict[str, Any]]]:
-    """Retourne l'effectif statique d'une équipe ou None si inconnu."""
-    return _STATIC_SQUADS.get(team_name, None)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  ORCHESTRATEUR : SCRAPING COMPLET EN UNE PASSE
-# ────────────────────────────────────────────────────────────────────────────
-
-async def scraping_complet() -> Dict[str, Any]:
-    """
-    Lance le scraping de toutes les sources en parallèle.
-    Retourne un résumé de ce qui a été récupéré.
-    """
-    logger.info("🚀 Lancement du scraping complet (FIFA + Olympics)...")
-
-    # Lancement en parallèle pour optimiser le temps de traitement
-    resultats = await asyncio.gather(
-        scraper_scores_fifa(),
-        scraper_classements_fifa(),
-        detecter_nouvelles_listes(),
-        return_exceptions=True,  # Ne pas planter si l'un échoue
-    )
-
-    matchs = resultats[0] if not isinstance(resultats[0], Exception) else []
-    classements = resultats[1] if not isinstance(resultats[1], Exception) else {}
-    nouvelles_nations = resultats[2] if not isinstance(resultats[2], Exception) else []
-
-    # Si de nouvelles listes sont détectées, les scraper aussi
-    effectifs_nouveaux = []
-    if nouvelles_nations:
-        logger.info(f"📋 {len(nouvelles_nations)} nouvelles listes détectées, scraping des effectifs...")
-        effectifs_bruts = await scraper_effectifs_olympics()
-        effectifs_nouveaux = [
-            convertir_effectif_pour_db(e)
-            for e in effectifs_bruts
-            if e.get("nation") in nouvelles_nations
-        ]
-
-    resume = {
-        "matchs_scraped": len(matchs),
-        "groupes_scraped": len(classements),
-        "nouvelles_nations": nouvelles_nations,
-        "effectifs_nouveaux": len(effectifs_nouveaux),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-
-    logger.info(
-        f"✅ Scraping complet terminé : {resume['matchs_scraped']} matchs, "
-        f"{resume['groupes_scraped']} groupes, "
-        f"{resume['effectifs_nouveaux']} effectifs mis à jour"
-    )
-
+def get_scraping_status() -> Dict[str, Any]:
+    """Retourne le statut du dernier scraping."""
     return {
-        "matchs": matchs,
-        "classements": classements,
-        "effectifs": effectifs_nouveaux,
-        "resume": resume,
+        "sofascore": _scraping_status["sofascore"],
+        "olympics": _scraping_status["olympics"],
+        "data_version_hash": _scraping_status["data_version_hash"],
     }
+
+
+async def cleanup():
+    """Cleanup au shutdown."""
+    await _close_playwright_browser()

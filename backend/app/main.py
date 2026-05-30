@@ -72,11 +72,12 @@ except Exception as e:
     RULES_AVAILABLE = False
 
 try:
-    from app.scraper import get_all_players_market
+    from app.scraper import close_browser, get_all_players_market
     SCRAPER_AVAILABLE = True
 except Exception as e:
     logger.warning(f"⚠️  Scraper non disponible : {e}")
     SCRAPER_AVAILABLE = False
+    close_browser = None
 
 try:
     from app.data_wc2026 import MATCHS_GROUPES, ENTRAINEURS, get_tous_les_matchs
@@ -166,7 +167,7 @@ async def on_startup() -> None:
 
     logger.info(
         f"   DB={DB_AVAILABLE} | Scraper={SCRAPER_AVAILABLE} | "
-        f"WC_Data={WC_DATA_AVAILABLE} | Updater={UPDATER_AVAILABLE} | "
+        f"OfficialOnly=True | Updater={UPDATER_AVAILABLE} | "
         f"JWT={'configuré' if SUPABASE_JWT_SECRET else 'dev (non vérifié)'}"
     )
 
@@ -467,11 +468,14 @@ async def sync_on_login(
                 "total":               total,
             },
             "sync_info": {
-                "matchs_scraped":     sync_login_info.get("matchs_en_memoire", 0),
-                "joueurs_recalcules": 0,
-                "pronos_calcules":    sync_login_info.get("pronos_calcules", len(pronos)),
+                "matchs_scraped":     sync_login_info.get("matchs_scraped", 0),
+                "joueurs_recalcules": sync_login_info.get("joueurs_recalcules", 0),
+                "pronos_calcules":    sync_login_info.get("joueurs_recalcules", len(pronos)),
+                "effectifs_nouveaux": sync_login_info.get("effectifs_nouveaux", 0),
+                "nations_deverrouillees": sync_login_info.get("nations_deverrouillees", []),
                 "timestamp":          datetime.utcnow().isoformat(),
-                "mode":               "normal",
+                "mode":               "official_realtime",
+                "erreurs":            sync_login_info.get("erreurs", []),
             },
         }
 
@@ -498,8 +502,6 @@ async def get_players(
     max_price: Optional[float] = None,
 ):
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        if SCRAPER_AVAILABLE:
-            return get_all_players_market()
         return []
     try:
         db    = SessionLocal()
@@ -510,10 +512,9 @@ async def get_players(
             query = query.filter(Player.nationality.ilike(f"%{nationality}%"))
         if max_price is not None:
             query = query.filter(Player.price <= max_price)
+        query = query.filter(Player.is_confirmed == True)
         players = query.order_by(Player.price.desc()).all()
         db.close()
-        if not players and SCRAPER_AVAILABLE:
-            return get_all_players_market()
         return [
             {"id": p.id, "name": p.name, "position": p.position,
              "nationality": p.nationality, "price": p.price,
@@ -523,7 +524,7 @@ async def get_players(
         ]
     except Exception as e:
         logger.error(f"GET /players : {e}")
-        return get_all_players_market() if SCRAPER_AVAILABLE else []
+        return []
 
 
 @app.get("/coaches")
@@ -532,7 +533,7 @@ async def get_coaches():
         return _coaches_statiques()
     try:
         db = SessionLocal()
-        coaches = db.query(Coach).all()
+        coaches = db.query(Coach).filter(Coach.is_confirmed == True).all()
         db.close()
         if not coaches:
             return _coaches_statiques()
@@ -548,6 +549,7 @@ async def get_coaches():
 
 
 def _coaches_statiques() -> list:
+    return []
     """Retourne les entraîneurs depuis data_wc2026 si BDD vide."""
     if not WC_DATA_AVAILABLE:
         return []
@@ -608,28 +610,47 @@ async def get_leaderboard():
 
 @app.get("/matches")
 async def get_matches():
-    """Retourne les matchs depuis data_wc2026 si disponible, sinon statiques."""
-    if WC_DATA_AVAILABLE:
-        # Format compatible avec l'ancien frontend
+    """Retourne uniquement les matchs officiels sauvegardes par la sync FIFA."""
+    if not DB_AVAILABLE:
+        return []
+    db = None
+    try:
+        db = SessionLocal()
+        rows = db.execute(
+            text(
+                """
+                SELECT match_id, home, away, match_group, match_date, home_score,
+                       away_score, is_finished, is_locked, status, display_order
+                FROM match_results
+                ORDER BY COALESCE(match_date, ''), display_order, match_id
+                """
+            )
+        ).mappings().all()
         return [
             {
-                "id":          m["id"],
-                "home":        m["domicile"],
-                "away":        m["exterieur"],
-                "group":       m["groupe"],
-                "date":        m["date"],
-                "is_locked":   m["is_locked"],
-                "home_score":  m.get("score_dom"),
-                "away_score":  m.get("score_ext"),
-                "is_finished": m["is_finished"],
+                "id": row["match_id"],
+                "home": row["home"],
+                "away": row["away"],
+                "group": row["match_group"],
+                "date": row["match_date"],
+                "is_locked": bool(row["is_locked"]),
+                "home_score": row["home_score"],
+                "away_score": row["away_score"],
+                "is_finished": bool(row["is_finished"]),
+                "status": row["status"],
             }
-            for m in MATCHS_GROUPES
+            for row in rows
         ]
-    return _MATCHS_STATIQUES
+    except Exception as e:
+        logger.warning(f"GET /matches sans donnees officielles disponibles : {e}")
+        return []
+    finally:
+        if db:
+            db.close()
 
 
 # ── Matchs statiques fallback ─────────────────────────────────────────
-_MATCHS_STATIQUES = [
+_MATCHS_STATIQUES_REMOVED = [
     {"id": 1,  "home": "USA",       "away": "Canada",      "group": "Groupe A", "date": "2026-06-11", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
     {"id": 2,  "home": "Mexique",   "away": "Jamaïque",    "group": "Groupe A", "date": "2026-06-11", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
     {"id": 5,  "home": "France",    "away": "Belgique",    "group": "Groupe B", "date": "2026-06-12", "is_locked": False, "home_score": None, "away_score": None, "is_finished": False},
@@ -785,10 +806,14 @@ async def save_roster(payload: RosterPayload, _token: dict = Depends(verify_supa
         if len(set(payload.player_ids)) != 15:
             db.close()
             raise HTTPException(status_code=400, detail="Un joueur ne peut pas être sélectionné plusieurs fois.")
-        players = db.query(Player).filter(Player.id.in_(payload.player_ids)).all()
+        players = (
+            db.query(Player)
+            .filter(Player.id.in_(payload.player_ids), Player.is_confirmed == True)
+            .all()
+        )
         if len(players) != len(payload.player_ids):
             db.close()
-            raise HTTPException(status_code=400, detail="Joueur(s) introuvable(s).")
+            raise HTTPException(status_code=400, detail="Joueur(s) introuvable(s) ou equipe encore verrouillee.")
         nationalite_counts = {}
         for player in players:
             key = _nation_key(player.nationality)
@@ -800,7 +825,7 @@ async def save_roster(payload: RosterPayload, _token: dict = Depends(verify_supa
         total = sum(p.price for p in players)
         coach = None
         if payload.coach_id:
-            coach = db.query(Coach).filter(Coach.id == payload.coach_id).first()
+            coach = db.query(Coach).filter(Coach.id == payload.coach_id, Coach.is_confirmed == True).first()
             if not coach:
                 db.close()
                 raise HTTPException(status_code=400, detail="Entraîneur introuvable.")
