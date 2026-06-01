@@ -29,7 +29,7 @@ from app.database import SessionLocal
 
 logger = logging.getLogger("admin_routes")
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 # ════════════════════════════════════════════════════════════════════════
 #  Modèles Pydantic

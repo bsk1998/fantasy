@@ -6,7 +6,7 @@ admin_models.py — Modèles pour l'administration
 
 from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey
 from datetime import datetime
-from app.db import Base
+from app.models import Base
 
 
 class AdminLog(Base):
