@@ -1,944 +1,501 @@
 """
-main.py — Fantasy Boulzazen API WC 2026 v6.0
-=============================================
-Groq IA natif · Sans Playwright · Render free tier compatible
+main.py — Application FastAPI Fantasy Boulzazen WC 2026
+========================================================
+Routes principales + intégration admin panel
 """
 
-import multiprocessing
-import sys
-
-if sys.platform == "win32":
-    try:
-        multiprocessing.set_start_method("spawn", force=False)
-    except RuntimeError:
-        pass
-
-import json
 import logging
 import os
-import traceback
-import unicodedata
+import asyncio
 from datetime import datetime
+from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
+import jwt
+from sqlalchemy import text
+
+# ────────────────────────────────────────────────────────────────────────
+#  Imports internes
+# ────────────────────────────────────────────────────────────────────────
+
+try:
+    from app.db import SessionLocal, engine, Base
+    from app.models import (
+        User, League, TeamNation, Player, Coach, MatchResult,
+        GroupStanding, FantasyRoster, PredictionScore,
+        PredictionTableau, PredictionAnnexes, Complaint
+    )
+    DB_AVAILABLE = True
+    MODELS_AVAILABLE = True
+except ImportError as e:
+    DB_AVAILABLE = False
+    MODELS_AVAILABLE = False
+    print(f"❌ DB/Models import erreur : {e}")
+
+try:
+    from app.admin_routes import router as admin_router
+    from app.admin_auth import verify_admin_token
+    ADMIN_AVAILABLE = True
+except ImportError as e:
+    ADMIN_AVAILABLE = False
+    print(f"⚠️ Admin routes non disponibles : {e}")
+
+try:
+    from app.updater import start_scheduler, get_matchs_actuels, tache_mise_a_jour_quotidienne
+    UPDATER_AVAILABLE = True
+except ImportError as e:
+    UPDATER_AVAILABLE = False
+    print(f"⚠️ Updater non disponible : {e}")
+
+try:
+    from app.scraper import get_scraping_status
+    SCRAPER_AVAILABLE = True
+except ImportError as e:
+    SCRAPER_AVAILABLE = False
+    print(f"⚠️ Scraper non disponible : {e}")
+
+# ────────────────────────────────────────────────────────────────────────
+#  Configuration
+# ────────────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger("fantasy_api")
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-)
-logger = logging.getLogger("fantasy_boulzazen")
-
-# ── Imports applicatifs ───────────────────────────────────────────────────────
-try:
-    from app.database import get_db, engine, SessionLocal
-    DB_AVAILABLE = True
-except Exception as e:
-    logger.error(f"❌ Database: {e}")
-    DB_AVAILABLE = False
-
-try:
-    from app.models import (
-        Base, User, Player, Coach, FantasyRoster, TeamNation,
-        PredictionScore, PredictionTableau, PredictionAnnexes, Complaint,
-    )
-    MODELS_AVAILABLE = True
-except Exception as e:
-    logger.error(f"❌ Models: {e}")
-    MODELS_AVAILABLE = False
-
-try:
-    from app.rules_engine import calculer_points_pronostic_score
-    RULES_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"⚠️  Rules engine: {e}")
-    RULES_AVAILABLE = False
-
-try:
-    from app.updater import (
-        start_scheduler, stop_scheduler, get_scheduler_status,
-        tache_mise_a_jour_quotidienne, sync_au_login,
-    )
-    UPDATER_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"⚠️  Updater: {e}")
-    UPDATER_AVAILABLE = False
-
-try:
-    from app.routes_ia import router as ia_router
-    IA_ROUTES_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"⚠️  Routes IA: {e}")
-    IA_ROUTES_AVAILABLE = False
-
-try:
-    from jose import jwt, JWTError
-    JWT_AVAILABLE = True
-except Exception:
-    JWT_AVAILABLE = False
-
-# ── Création tables ───────────────────────────────────────────────────────────
-if DB_AVAILABLE and MODELS_AVAILABLE:
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Tables BDD créées/vérifiées")
-    except Exception as e:
-        logger.error(f"❌ Création tables: {e}")
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  APP FASTAPI
-# ══════════════════════════════════════════════════════════════════════════════
-
-app = FastAPI(
-    title="Fantasy Boulzazen — API WC 2026",
-    description="Backend Fantasy League CDM 2026 avec Groq IA",
-    version="6.0.0",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# Middleware : strip /api prefix
-@app.middleware("http")
-async def strip_api_prefix(request, call_next):
-    path = request.scope.get("path", "")
-    if path.startswith("/api/"):
-        request.scope["path"] = path[4:]
-    return await call_next(request)
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+JWT_SECRET = os.getenv("JWT_SECRET", "fantasy-secret-2026")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# CORS
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
-ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+# ────────────────────────────────────────────────────────────────────────
+#  Événements Lifespan
+# ────────────────────────────────────────────────────────────────────────
 
-# Routes IA
-if IA_ROUTES_AVAILABLE:
-    app.include_router(ia_router)
-    logger.info("✅ Routes IA montées sur /ia/*")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup et shutdown events."""
+    # ──── STARTUP ────
+    logger.info("🚀 Fantasy Boulzazen WC 2026 — Démarrage...")
 
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+    # Créer les tables
+    if DB_AVAILABLE and MODELS_AVAILABLE:
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Base de données initialisée")
+        except Exception as e:
+            logger.error(f"❌ DB init erreur : {e}")
 
+    # Vérifier Groq
+    groq_ok = await _verifier_groq()
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    logger.info("🚀 Fantasy Boulzazen API v6.0 — démarrage (Groq IA)")
+    # Démarrer le scheduler si disponible
     if UPDATER_AVAILABLE:
         try:
             start_scheduler()
+            logger.info("✅ Scheduler démarré")
         except Exception as e:
-            logger.error(f"❌ Scheduler: {e}")
-    import os as _os
-    groq_key = _os.getenv("GROQ_API_KEY", "")
-    logger.info(
-        f"   Groq={'✅ configuré' if groq_key else '❌ MANQUANT — ajoutez GROQ_API_KEY'}"
-        f" | DB={DB_AVAILABLE} | Updater={UPDATER_AVAILABLE}"
-    )
+            logger.error(f"❌ Scheduler erreur : {e}")
 
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    if UPDATER_AVAILABLE:
-        try:
-            stop_scheduler()
-        except Exception:
-            pass
-    logger.info("🛑 API arrêtée")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PYDANTIC MODELS
-# ══════════════════════════════════════════════════════════════════════════════
-
-class SyncRequest(BaseModel):
-    user_id:  str
-    email:    str
-    username: Optional[str] = None
-
-class PredictionScorePayload(BaseModel):
-    user_id:        str
-    match_id:       str
-    predicted_home: int
-    predicted_away: int
-
-class BracketPayload(BaseModel):
-    user_id:      str
-    bracket_data: dict
-
-class AnnexesPayload(BaseModel):
-    user_id:  str
-    annexes:  dict
-
-class RosterPayload(BaseModel):
-    user_id:    str
-    player_ids: list
-    coach_id:   Optional[int] = None
-    formation:  str = "4-3-3"
-
-class ComplaintPayload(BaseModel):
-    user_id:      str
-    match_id:     Optional[str]  = None
-    player_id:    Optional[int]  = None
-    description:  str
-    stat_claimed: Optional[dict] = None
-
-class ManualUpdatePayload(BaseModel):
-    confirm: bool = False
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-import re as _re
-
-def _make_unique_username(base: str, db) -> str:
-    username  = _re.sub(r"[^a-zA-Z0-9_\-]", "_", base[:24]) or "joueur"
-    candidate = username
-    counter   = 2
-    while True:
-        if not db.query(User).filter(User.username == candidate).first():
-            return candidate
-        candidate = f"{username}_{counter}"
-        counter  += 1
-        if counter > 999:
-            import random
-            return f"{username}_{random.randint(1000,9999)}"
-
-
-def _build_fallback_user(body: SyncRequest) -> dict:
-    username = body.username or body.email.split("@")[0]
-    return {
-        "status": "degraded",
-        "user": {
-            "id": None, "username": username, "email": body.email,
-            "score_fantasy": 0, "score_pronos_scores": 0,
-            "score_bracket": 0, "score_annexes": 0, "total": 0,
-        },
-        "sync_info": {"mode": "degraded"},
-    }
-
-
-def _nation_key(value: str | None) -> str:
-    raw = (value or "").strip().lower()
-    normalized = unicodedata.normalize("NFKD", raw)
-    ascii_val = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    aliases = {
-        "francaise": "france", "francais": "france",
-        "bresilienne": "bresil", "bresilien": "bresil",
-        "anglaise": "angleterre", "anglais": "angleterre",
-        "espagnole": "espagne", "espagnol": "espagne",
-        "algerienne": "algerie", "algerien": "algerie",
-        "marocaine": "maroc", "marocain": "maroc",
-        "italienne": "italie", "italien": "italie",
-    }
-    return aliases.get(ascii_val, ascii_val)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  AUTH
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def verify_supabase_token(authorization: str = Header(default=None)) -> dict:
-    if not SUPABASE_JWT_SECRET:
-        return {"sub": "dev-user", "email": "dev@boulzazen.local"}
-    if not JWT_AVAILABLE:
-        return {"sub": "dev-user", "email": "dev@boulzazen.local"}
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token manquant.")
-    token = authorization.split(" ", 1)[1]
-    # Guest sessions
-    if token == "guest-local-session":
-        return {"sub": "guest", "email": "guest@boulzazen.local"}
-    try:
-        return jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"],
-                          options={"verify_aud": False})
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalide.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HEALTH
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/health")
-async def health_check():
-    db_status = "unknown"
-    if DB_AVAILABLE:
+    # Scraping initial si DB vide
+    if groq_ok and DB_AVAILABLE:
         try:
             db = SessionLocal()
-            db.execute(text("SELECT 1"))
+            count = db.execute(text("SELECT COUNT(*) FROM match_results")).scalar()
+            if count == 0:
+                logger.info("🔄 DB vide + Groq disponible → scraping initial...")
+                asyncio.create_task(_scraping_initial())
             db.close()
-            db_status = "ok"
+        except Exception:
+            pass
+
+    logger.info(
+        f"✨ Fantasy Boulzazen démarré | "
+        f"DB={DB_AVAILABLE} | Groq={'✅' if groq_ok else '❌'} | "
+        f"Admin={ADMIN_AVAILABLE} | Updater={UPDATER_AVAILABLE}"
+    )
+
+    yield  # Application tourne ici
+
+    # ──── SHUTDOWN ────
+    logger.info("🛑 Arrêt de l'application...")
+
+
+# ────────────────────────────────────────────────────────────────────────
+#  Vérification Groq
+# ────────────────────────────────────────────────────────────────────────
+
+async def _verifier_groq() -> bool:
+    """Vérifie que la clé Groq est valide et que le modèle répond."""
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_key:
+        logger.warning(
+            "⚠️  GROQ_API_KEY manquante dans .env — "
+            "le scraping automatique est désactivé. "
+            "Ajoutez GROQ_API_KEY=gsk_... dans backend/.env"
+        )
+        return False
+    try:
+        from groq import Groq
+        client = Groq(api_key=groq_key)
+        resp = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": "Réponds juste: OK"}],
+            max_tokens=5,
+        )
+        if resp.choices[0].message.content.strip():
+            logger.info("✅ Groq API opérationnelle")
+            return True
+    except Exception as e:
+        logger.error(f"❌ Groq API erreur : {e}")
+    return False
+
+
+async def _scraping_initial():
+    """Scraping différé de 5s pour laisser le serveur démarrer."""
+    await asyncio.sleep(5)
+    if UPDATER_AVAILABLE:
+        try:
+            await tache_mise_a_jour_quotidienne()
         except Exception as e:
-            db_status = f"error: {str(e)[:50]}"
+            logger.error(f"Scraping initial erreur : {e}")
 
-    scheduler_info = get_scheduler_status() if UPDATER_AVAILABLE else {"available": False}
-    groq_key = bool(os.getenv("GROQ_API_KEY", ""))
 
+# ────────────────────────────────────────────────────────────────────────
+#  Initialisation FastAPI
+# ────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Fantasy Boulzazen WC 2026",
+    description="Ligue Fantasy Football + Pronostics CDM 2026",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ────────────────────────────────────────────────────────────────────────
+#  Inclusion des routeurs
+# ────────────────────────────────────────────────────────────────────────
+
+if ADMIN_AVAILABLE:
+    app.include_router(admin_router)
+    logger.info("✅ Admin routes incluses")
+
+# ────────────────────────────────────────────────────────────────────────
+#  ROUTES PUBLIQUES — DONNÉES
+# ────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/matches")
+async def get_matches():
+    """Retourne la liste des matchs."""
+    # Niveau 1 : mémoire live (scraping récent)
+    if UPDATER_AVAILABLE:
+        try:
+            live = get_matchs_actuels()
+            if live:
+                return live
+        except Exception as e:
+            logger.warning(f"get_matchs_actuels erreur : {e}")
+
+    # Niveau 2 : DB
+    if DB_AVAILABLE:
+        db = None
+        try:
+            db = SessionLocal()
+            rows = db.execute(text("""
+                SELECT match_id, display_order, home, away, match_group,
+                       match_date, home_score, away_score,
+                       status, is_finished, is_locked
+                FROM match_results
+                ORDER BY COALESCE(display_order, 9999), match_id
+            """)).mappings().all()
+            if rows:
+                return [{
+                    "id":          r["match_id"],
+                    "home":        r["home"],
+                    "away":        r["away"],
+                    "group":       r["match_group"],
+                    "date":        r["match_date"],
+                    "home_score":  r["home_score"],
+                    "away_score":  r["away_score"],
+                    "is_finished": bool(r["is_finished"]),
+                    "is_locked":   bool(r["is_locked"]),
+                    "status":      r["status"] or "scheduled",
+                } for r in rows]
+        except Exception as e:
+            logger.error(f"GET /matches DB : {e}")
+        finally:
+            if db:
+                db.close()
+
+    # Niveau 3 : DB vide, scraping en cours
     return {
-        "status":           "ok",
-        "version":          "6.0.0",
-        "db_status":        db_status,
-        "groq_configured":  groq_key,
-        "groq_model":       "llama-3.3-70b-versatile",
-        "updater":          scheduler_info,
-        "ia_routes":        IA_ROUTES_AVAILABLE,
-        "timestamp":        datetime.utcnow().isoformat(),
+        "data": [],
+        "message": "Données en cours de chargement — scraping Groq en attente",
+        "groq_actif": bool(os.getenv("GROQ_API_KEY")),
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  AUTH SYNC
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/auth/sync")
-async def sync_on_login(
-    body: SyncRequest,
-    _token: dict = Depends(verify_supabase_token),
-):
+@app.get("/api/coaches")
+async def get_coaches():
+    """Retourne la liste des entraîneurs."""
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return _build_fallback_user(body)
-
+        return {
+            "data": [],
+            "message": "Entraîneurs en cours de chargement depuis Olympics via Groq",
+        }
+    
     db = None
     try:
-        db   = SessionLocal()
-        user = db.query(User).filter(User.email == body.email).first()
-
-        if not user:
-            uname = _make_unique_username(body.username or body.email.split("@")[0], db)
-            try:
-                user = User(
-                    username=uname, email=body.email, hashed_password="",
-                    score_fantasy=0, score_predictor_scores=0,
-                    score_predictor_tableaux=0, score_top_individuel=0,
-                )
-                db.add(user)
-                db.commit()
-                db.refresh(user)
-            except IntegrityError:
-                db.rollback()
-                user = db.query(User).filter(User.email == body.email).first()
-                if not user:
-                    return _build_fallback_user(body)
-
-        if body.username and body.username.strip() != user.username:
-            try:
-                nu = _make_unique_username(body.username.strip(), db)
-                if not db.query(User).filter(User.username == nu, User.id != user.id).first():
-                    user.username = nu
-            except Exception:
-                pass
-
-        sync_info = {}
-        if UPDATER_AVAILABLE:
-            try:
-                sync_info = await sync_au_login(body.email, db)
-            except Exception as e:
-                logger.warning(f"Sync updater: {e}")
-
-        total = sum([
-            user.score_fantasy or 0,
-            user.score_predictor_scores or 0,
-            user.score_predictor_tableaux or 0,
-            user.score_top_individuel or 0,
-        ])
-
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-
-        return {
-            "status": "synced",
-            "user": {
-                "id":                  user.id,
-                "username":            user.username,
-                "email":               user.email,
-                "score_fantasy":       user.score_fantasy or 0,
-                "score_pronos_scores": user.score_predictor_scores or 0,
-                "score_bracket":       user.score_predictor_tableaux or 0,
-                "score_annexes":       user.score_top_individuel or 0,
-                "total":               total,
-            },
-            "sync_info": {
-                **sync_info,
-                "timestamp": datetime.utcnow().isoformat(),
-                "mode":      "groq_realtime",
-            },
-        }
-
+        db = SessionLocal()
+        coaches = db.query(Coach).filter(Coach.is_confirmed == True).all()
+        
+        if coaches:
+            return [{
+                "id":           c.id,
+                "name":         c.name,
+                "nationality":  c.nationality,
+                "price":        c.price,
+                "wins":         c.wins or 0,
+                "losses":       c.losses or 0,
+                "points_total": c.points_total or 0,
+                "status":       c.status or "present",
+            } for c in coaches]
     except Exception as e:
-        logger.error(f"❌ Sync {body.email}: {e}\n{traceback.format_exc()}")
-        if db:
-            try: db.rollback()
-            except Exception: pass
-        return _build_fallback_user(body)
+        logger.error(f"GET /coaches : {e}")
     finally:
         if db:
-            try: db.close()
-            except Exception: pass
+            db.close()
+
+    return {
+        "data": [],
+        "message": "Entraîneurs en cours de chargement depuis Olympics via Groq",
+    }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PLAYERS & COACHES
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/players")
+@app.get("/api/players")
 async def get_players(
     position:    Optional[str]   = None,
     nationality: Optional[str]   = None,
     max_price:   Optional[float] = None,
 ):
+    """Retourne la liste des joueurs avec filtres."""
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return []
+        return {
+            "data": [],
+            "message": "Joueurs en cours de chargement depuis Olympics via Groq",
+        }
+    
+    db = None
     try:
-        db    = SessionLocal()
+        db = SessionLocal()
         query = db.query(Player).filter(Player.is_confirmed == True)
+        
         if position and position != "ALL":
             query = query.filter(Player.position == position.upper())
         if nationality:
             query = query.filter(Player.nationality.ilike(f"%{nationality}%"))
         if max_price is not None:
             query = query.filter(Player.price <= max_price)
+        
         players = query.order_by(Player.price.desc()).all()
-        result = [
-            {"id": p.id, "name": p.name, "position": p.position,
-             "nationality": p.nationality, "price": p.price,
-             "goals": p.goals, "assists": p.assists,
-             "points_total": p.points_total, "is_confirmed": True}
-            for p in players
-        ]
-        db.close()
-        return result
-    except Exception as e:
-        logger.error(f"GET /players: {e}")
-        return []
-
-
-@app.get("/coaches")
-async def get_coaches():
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return []
-    try:
-        db = SessionLocal()
-        coaches = db.query(Coach).filter(Coach.is_confirmed == True).all()
-        result = [
-            {"id": c.id, "name": c.name, "nationality": c.nationality,
-             "price": c.price, "wins": c.wins, "losses": c.losses,
-             "points_total": c.points_total, "status": c.status}
-            for c in coaches
-        ]
-        db.close()
-        return result
-    except Exception as e:
-        logger.error(f"GET /coaches: {e}")
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MATCHES
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/matches")
-async def get_matches():
-    """Retourne les matchs depuis BDD (peuplée par Groq au premier login)."""
-    if not DB_AVAILABLE:
-        return []
-    db = None
-    try:
-        db = SessionLocal()
-        # Vérifier si la table existe et a des données
-        try:
-            rows = db.execute(text("""
-                SELECT match_id, home, away, match_group, round, match_date,
-                       home_score, away_score, is_finished, is_locked, status,
-                       display_order, venue
-                FROM match_results
-                ORDER BY COALESCE(display_order, 0), COALESCE(match_date, ''), match_id
-            """)).mappings().all()
-        except Exception:
-            rows = []
-
-        if not rows:
-            # BDD vide → lancer scraping du calendrier
-            logger.info("📅 Aucun match en BDD — génération via Groq...")
-            from app.scraper import scraper_matchs_calendrier
-            from app.updater import _sync_matchs, _ensure_runtime_tables
-            _ensure_runtime_tables(db)
-            matchs = await scraper_matchs_calendrier()
-            _sync_matchs(matchs, db)
-            rows = db.execute(text("""
-                SELECT match_id, home, away, match_group, round, match_date,
-                       home_score, away_score, is_finished, is_locked, status,
-                       display_order, venue
-                FROM match_results
-                ORDER BY COALESCE(display_order, 0), COALESCE(match_date, ''), match_id
-            """)).mappings().all()
-
-        return [
-            {
-                "id":           row["match_id"],
-                "home":         row["home"],
-                "away":         row["away"],
-                "group":        row["match_group"],
-                "round":        row["round"],
-                "date":         row["match_date"],
-                "venue":        row["venue"],
-                "home_score":   row["home_score"],
-                "away_score":   row["away_score"],
-                "is_finished":  bool(row["is_finished"]),
-                "is_locked":    bool(row["is_locked"]),
-                "status":       row["status"],
+        
+        if not players:
+            return {
+                "data": [],
+                "message": "Joueurs en cours de chargement depuis Olympics via Groq",
             }
-            for row in rows
-        ]
+        
+        return [{
+            "id":           p.id,
+            "name":         p.name,
+            "position":     p.position,
+            "nationality":  p.nationality,
+            "price":        p.price,
+            "club":         p.club,
+            "goals":        p.goals,
+            "assists":      p.assists,
+            "points_total": p.points_total,
+            "is_confirmed": p.is_confirmed,
+        } for p in players]
     except Exception as e:
-        logger.error(f"GET /matches: {e}")
-        return []
+        logger.error(f"GET /players : {e}")
+        return {"data": [], "message": str(e)}
     finally:
         if db:
             db.close()
 
 
-@app.get("/standings")
-async def get_standings():
-    """Retourne les classements de groupes."""
-    if not DB_AVAILABLE:
-        return {}
+@app.get("/api/teams")
+async def get_teams():
+    """Retourne la liste des nations."""
+    if not DB_AVAILABLE or not MODELS_AVAILABLE:
+        return {
+            "data": [],
+            "message": "Nations en cours de chargement",
+        }
+    
     db = None
     try:
         db = SessionLocal()
-        try:
-            rows = db.execute(text("""
-                SELECT group_name, team, points, played, wins, draws, losses,
-                       goals_for, goals_against, goal_diff, qualified
-                FROM group_standings
-                ORDER BY group_name, points DESC, goal_diff DESC
-            """)).mappings().all()
-        except Exception:
-            rows = []
-
-        result: dict = {}
-        for row in rows:
-            gn = row["group_name"]
-            if gn not in result:
-                result[gn] = []
-            result[gn].append({
-                "team":          row["team"],
-                "points":        row["points"],
-                "played":        row["played"],
-                "won":           row["wins"],
-                "drawn":         row["draws"],
-                "lost":          row["losses"],
-                "goals_for":     row["goals_for"],
-                "goals_against": row["goals_against"],
-                "goal_diff":     row["goal_diff"],
-                "qualified":     bool(row["qualified"]),
-            })
-        return result
+        teams = db.query(TeamNation).all()
+        
+        return [{
+            "id":           t.id,
+            "name":         t.name,
+            "is_confirmed": t.is_confirmed,
+            "is_locked":    getattr(t, 'is_locked', True),
+            "flag":         t.flag or "🏴",
+        } for t in teams]
     except Exception as e:
-        logger.error(f"GET /standings: {e}")
-        return {}
+        logger.error(f"GET /teams : {e}")
+        return {"data": [], "message": str(e)}
     finally:
         if db:
             db.close()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  LEADERBOARD
-# ══════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────
+#  ROUTES DE DEBUG / STATUS
+# ────────────────────────────────────────────────────────────────────────
 
-@app.get("/leaderboard")
-async def get_leaderboard():
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return []
-    try:
-        db    = SessionLocal()
-        users = db.query(User).all()
-        lb    = []
-        for u in users:
-            total = sum([
-                u.score_fantasy or 0,
-                u.score_predictor_scores or 0,
-                u.score_predictor_tableaux or 0,
-                u.score_top_individuel or 0,
-            ])
-            lb.append({
-                "username": u.username,
-                "fantasy":  u.score_fantasy or 0,
-                "scores":   u.score_predictor_scores or 0,
-                "bracket":  u.score_predictor_tableaux or 0,
-                "annexes":  u.score_top_individuel or 0,
-                "total":    total,
-            })
-        db.close()
-        lb.sort(key=lambda x: x["total"], reverse=True)
-        for i, entry in enumerate(lb):
-            entry["rank"] = i + 1
-        return lb
-    except Exception as e:
-        logger.error(f"GET /leaderboard: {e}")
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PREDICTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/predictions/score")
-async def save_score_prediction(
-    payload: PredictionScorePayload,
-    _token: dict = Depends(verify_supabase_token),
-):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "saved", "match_id": payload.match_id}
-    try:
-        db   = SessionLocal()
-        user = db.query(User).filter(User.email == payload.user_id).first()
-        if not user:
-            try:
-                user = db.query(User).filter(User.id == int(payload.user_id)).first()
-            except (ValueError, TypeError):
-                pass
-        if not user:
-            db.close()
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-
-        prono = (db.query(PredictionScore)
-                 .filter(PredictionScore.user_id == user.id,
-                          PredictionScore.match_id == str(payload.match_id))
-                 .first())
-        if prono:
-            prono.predicted_home_score = payload.predicted_home
-            prono.predicted_away_score = payload.predicted_away
-        else:
-            prono = PredictionScore(
-                user_id=user.id, match_id=str(payload.match_id),
-                predicted_home_score=payload.predicted_home,
-                predicted_away_score=payload.predicted_away,
-                points_earned=0,
-            )
-            db.add(prono)
-        db.commit()
-        db.close()
-        return {"status": "saved", "match_id": payload.match_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"POST /predictions/score: {e}")
-        return {"status": "saved", "match_id": payload.match_id}
-
-
-@app.get("/predictions/score/{user_id}")
-async def get_score_predictions(user_id: int, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return []
-    try:
-        db    = SessionLocal()
-        pronos = db.query(PredictionScore).filter(PredictionScore.user_id == user_id).all()
-        result = [
-            {"match_id": p.match_id,
-             "predicted_home": p.predicted_home_score,
-             "predicted_away": p.predicted_away_score,
-             "points_earned":  p.points_earned}
-            for p in pronos
-        ]
-        db.close()
-        return result
-    except Exception as e:
-        return []
-
-
-@app.post("/predictions/bracket")
-async def save_bracket(payload: BracketPayload, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "saved"}
-    try:
-        db   = SessionLocal()
-        user = db.query(User).filter(User.email == payload.user_id).first()
-        if not user:
-            try:
-                user = db.query(User).filter(User.id == int(payload.user_id)).first()
-            except (ValueError, TypeError):
-                pass
-        if not user:
-            db.close()
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        tableau = db.query(PredictionTableau).filter(PredictionTableau.user_id == user.id).first()
-        if tableau:
-            tableau.bracket_data = payload.bracket_data
-        else:
-            tableau = PredictionTableau(user_id=user.id, bracket_data=payload.bracket_data, points_earned=0)
-            db.add(tableau)
-        db.commit()
-        db.close()
-        return {"status": "saved"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"status": "saved"}
-
-
-@app.post("/predictions/annexes")
-async def save_annexes(payload: AnnexesPayload, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "saved"}
-    try:
-        db   = SessionLocal()
-        user = db.query(User).filter(User.email == payload.user_id).first()
-        if not user:
-            try:
-                user = db.query(User).filter(User.id == int(payload.user_id)).first()
-            except (ValueError, TypeError):
-                pass
-        if not user:
-            db.close()
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        record = db.query(PredictionAnnexes).filter(PredictionAnnexes.user_id == user.id).first()
-        if record:
-            record.annexes_data = payload.annexes
-        else:
-            db.add(PredictionAnnexes(user_id=user.id, annexes_data=payload.annexes, points_earned=0))
-        db.commit()
-        db.close()
-        return {"status": "saved"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"status": "saved"}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  FANTASY ROSTER
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/fantasy/roster")
-async def save_roster(payload: RosterPayload, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "saved", "player_count": len(payload.player_ids),
-                "remaining_budget": 100.0, "formation": payload.formation}
-    try:
-        db = SessionLocal()
-        if len(payload.player_ids) != 15:
-            db.close()
-            raise HTTPException(status_code=400, detail="L'effectif doit contenir exactement 15 joueurs.")
-        if len(set(payload.player_ids)) != 15:
-            db.close()
-            raise HTTPException(status_code=400, detail="Pas de doublons autorisés.")
-
-        players = (db.query(Player)
-                   .filter(Player.id.in_(payload.player_ids), Player.is_confirmed == True)
-                   .all())
-        if len(players) != len(payload.player_ids):
-            db.close()
-            raise HTTPException(status_code=400, detail="Joueur(s) introuvable(s).")
-
-        nat_counts: dict = {}
-        for p in players:
-            k = _nation_key(p.nationality)
-            nat_counts[k] = nat_counts.get(k, 0) + 1
-        over = [k for k, v in nat_counts.items() if v > 3]
-        if over:
-            db.close()
-            raise HTTPException(status_code=400, detail=f"Max 3 joueurs par nation : {', '.join(over)}")
-
-        total = sum(p.price for p in players)
-        coach = None
-        if payload.coach_id:
-            coach = db.query(Coach).filter(Coach.id == payload.coach_id, Coach.is_confirmed == True).first()
-            if not coach:
-                db.close()
-                raise HTTPException(status_code=400, detail="Entraîneur introuvable.")
-            if any(_nation_key(p.nationality) == _nation_key(coach.nationality) for p in players):
-                db.close()
-                raise HTTPException(status_code=400, detail="Conflit nationalité coach/joueur.")
-            total += coach.price
-
-        if total > 100.0:
-            db.close()
-            raise HTTPException(status_code=400, detail=f"Budget dépassé : {total:.1f}M€")
-
-        user = db.query(User).filter(User.email == payload.user_id).first()
-        if not user:
-            try:
-                user = db.query(User).filter(User.id == int(payload.user_id)).first()
-            except (ValueError, TypeError):
-                pass
-        if not user:
-            db.close()
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-
-        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
-        if roster:
-            roster.players = players
-            roster.coach_id = payload.coach_id
-            roster.current_formation = payload.formation
-            roster.remaining_budget  = round(100.0 - total, 2)
-        else:
-            roster = FantasyRoster(
-                user_id=user.id, coach_id=payload.coach_id,
-                current_formation=payload.formation,
-                remaining_budget=round(100.0 - total, 2),
-            )
-            roster.players = players
-            db.add(roster)
-
-        db.commit()
-        db.close()
-        return {"status": "saved", "player_count": len(players),
-                "remaining_budget": round(100.0 - total, 2), "formation": payload.formation}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"POST /fantasy/roster: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/fantasy/roster/{user_id}")
-async def get_roster(user_id: int, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
-    try:
-        db     = SessionLocal()
-        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user_id).first()
-        if not roster:
-            db.close()
-            return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
-        players_data = [
-            {"id": p.id, "name": p.name, "position": p.position,
-             "nationality": p.nationality, "price": p.price,
-             "goals": p.goals, "assists": p.assists, "points_total": p.points_total}
-            for p in roster.players
-        ]
-        coach_data = None
-        if roster.coach:
-            c = roster.coach
-            coach_data = {"id": c.id, "name": c.name, "nationality": c.nationality,
-                          "price": c.price, "points_total": c.points_total}
-        result = {"players": players_data, "coach": coach_data,
-                  "formation": roster.current_formation, "remaining_budget": roster.remaining_budget}
-        db.close()
-        return result
-    except Exception as e:
-        return {"players": [], "coach": None, "formation": "4-3-3", "remaining_budget": 100.0}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ADMIN
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/admin/recalculate")
-async def manual_recalculate(_token: dict = Depends(verify_supabase_token)):
+@app.get("/api/scraping/status")
+async def scraping_status():
+    """Retourne l'état du scraping (pour debugging)."""
+    status_data = {}
+    
+    if SCRAPER_AVAILABLE:
+        try:
+            status_data = get_scraping_status()
+        except Exception as e:
+            logger.error(f"get_scraping_status erreur : {e}")
+    
+    mem_matchs = 0
     if UPDATER_AVAILABLE:
         try:
-            await tache_mise_a_jour_quotidienne()
-            return {"status": "recalculated", "mode": "groq_full_update"}
-        except Exception as e:
-            logger.error(f"Recalcul manuel: {e}")
-    return {"status": "skipped", "reason": "updater_unavailable"}
+            mem_matchs = len(get_matchs_actuels())
+        except Exception:
+            pass
+    
+    db_matchs, db_coaches, db_players = 0, 0, 0
+    if DB_AVAILABLE:
+        db = None
+        try:
+            db = SessionLocal()
+            db_matchs  = db.execute(text("SELECT COUNT(*) FROM match_results")).scalar() or 0
+            db_coaches = db.query(Coach).count()
+            db_players = db.query(Player).count()
+        except Exception:
+            pass
+        finally:
+            if db:
+                db.close()
+    
+    return {
+        "sources":         status_data,
+        "matchs_memoire":  mem_matchs,
+        "matchs_db":       db_matchs,
+        "coaches_db":      db_coaches,
+        "players_db":      db_players,
+        "groq_configure":  bool(os.getenv("GROQ_API_KEY")),
+        "groq_installed":  SCRAPER_AVAILABLE,
+        "admin_installed": ADMIN_AVAILABLE,
+        "updater_installed": UPDATER_AVAILABLE,
+    }
 
 
-@app.post("/admin/update-now")
-async def trigger_update(
-    payload: ManualUpdatePayload,
-    _token: dict = Depends(verify_supabase_token),
-):
-    if not payload.confirm:
-        raise HTTPException(status_code=400, detail="confirm=true requis")
+@app.post("/api/admin/force-scraping")
+async def force_scraping(authorization: Optional[str] = Header(None)):
+    """Déclenche immédiatement un scraping complet Groq → DB (admin seulement)."""
+    # Vérifier token admin
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Token manquant")
+    
+    token = authorization[7:]
+    payload = verify_admin_token(token)
+    if not payload:
+        raise HTTPException(401, "Token invalide")
+    
     if not UPDATER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Updater non disponible")
-    await tache_mise_a_jour_quotidienne()
-    return {"status": "ok", "message": "Mise à jour Groq lancée."}
-
-
-@app.get("/sync-status")
-async def get_sync_status():
-    stats = get_scheduler_status() if UPDATER_AVAILABLE else {"available": False}
-    return {"status": "ok", **stats}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  COMPLAINTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/complaints")
-async def submit_complaint(payload: ComplaintPayload, _token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"status": "submitted", "complaint_id": 1}
+        raise HTTPException(503, "Updater non disponible")
+    
+    if not os.getenv("GROQ_API_KEY"):
+        raise HTTPException(400, "GROQ_API_KEY manquante dans .env")
+    
     try:
-        db   = SessionLocal()
-        user = db.query(User).filter(User.email == payload.user_id).first()
-        if not user:
-            try:
-                user = db.query(User).filter(User.id == int(payload.user_id)).first()
-            except (ValueError, TypeError):
-                pass
-        if not user:
-            db.close()
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        complaint = Complaint(
-            user_id=user.id, match_id=str(payload.match_id) if payload.match_id else None,
-            player_id=payload.player_id, description=payload.description,
-            stat_claimed=json.dumps(payload.stat_claimed) if payload.stat_claimed else None,
-            status="pending", created_at=datetime.utcnow().isoformat(),
-        )
-        db.add(complaint)
-        db.commit()
-        db.refresh(complaint)
-        cid = complaint.id
-        db.close()
-        return {"status": "submitted", "complaint_id": cid}
-    except HTTPException:
-        raise
+        await tache_mise_a_jour_quotidienne()
+        return {"status": "ok", "message": "Scraping lancé avec succès"}
     except Exception as e:
-        logger.error(f"POST /complaints: {e}")
-        return {"status": "submitted", "complaint_id": 0}
+        logger.error(f"Force scraping erreur : {e}")
+        raise HTTPException(500, str(e))
 
 
-@app.get("/complaints")
-async def get_all_complaints(_token: dict = Depends(verify_supabase_token)):
-    if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return []
-    try:
-        db = SessionLocal()
-        complaints = db.query(Complaint).order_by(Complaint.id.desc()).all()
-        result = []
-        for c in complaints:
-            u = db.query(User).filter(User.id == c.user_id).first()
-            result.append({
-                "id": c.id, "user_id": c.user_id,
-                "username": u.username if u else "?",
-                "match_id": c.match_id, "player_id": c.player_id,
-                "description": c.description, "status": c.status,
-                "created_at": c.created_at, "resolved_at": c.resolved_at,
-            })
-        db.close()
-        return result
-    except Exception as e:
-        logger.error(f"GET /complaints: {e}")
-        return []
+@app.get("/api/health")
+async def health_check():
+    """Health check pour orchestration."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "db": "✅" if DB_AVAILABLE else "❌",
+        "admin": "✅" if ADMIN_AVAILABLE else "⚠️",
+        "updater": "✅" if UPDATER_AVAILABLE else "⚠️",
+    }
 
 
-# ── Entrypoint direct ─────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────
+#  ROUTES DE TEST / DOCUMENTATION
+# ────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    """Route racine — redirection vers la doc."""
+    return {
+        "message": "🎮 Fantasy Boulzazen WC 2026",
+        "docs": f"{API_BASE}/docs",
+        "admin_panel": f"{FRONTEND_URL}/admin",
+    }
+
+
+@app.get("/api/info")
+async def api_info():
+    """Informations sur l'API."""
+    return {
+        "app": "Fantasy Boulzazen WC 2026",
+        "version": "1.0.0",
+        "api_base": API_BASE,
+        "frontend_url": FRONTEND_URL,
+        "features": {
+            "fantasy_league": True,
+            "predictions_score": True,
+            "predictions_bracket": True,
+            "predictions_annexes": True,
+            "admin_panel": ADMIN_AVAILABLE,
+            "groq_integration": bool(GROQ_API_KEY),
+            "automatic_scraping": UPDATER_AVAILABLE,
+        },
+    }
+
+
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     import uvicorn
     uvicorn.run(
-        "app.main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        reload=False,
-        workers=1,
-        log_level="info",
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
     )
