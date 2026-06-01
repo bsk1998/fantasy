@@ -124,15 +124,20 @@ def _log_action(action: str, target_type: str, target_id: str = None, details: s
 #  ROUTES
 # ════════════════════════════════════════════════════════════════════════
 
-@router.post("/login", response_model=AdminLoginResponse)
-async def admin_login(req: AdminLoginRequest):
-    """Authentification admin : pseudo/mdp → JWT."""
-    if not verify_admin_credentials(req.username, req.password):
-        logger.warning(f"Tentative de connexion admin échouée : {req.username}")
-        raise HTTPException(
-            status_code=401,
-            detail="Pseudo ou mot de passe incorrect"
-        )
+# ✅ APRÈS — modèle Pydantic concret
+class RulesParseRequest(BaseModel):
+    raw_rules_text: str
+
+@router.post("/rules/parse")
+async def parse_rules_endpoint(req: RulesParseRequest, admin: dict = Depends(verify_admin)):
+    parsed, msg = await parse_rules(req.raw_rules_text)
+    if not parsed:
+        return {"status": "error", "message": msg}
+    return {
+        "status": "success",
+        "message": msg,
+        "rules": parsed.get("rules", []),
+    }
     
     token = generate_admin_token(req.username)
     _log_action("login", "admin", target_id="admin")
