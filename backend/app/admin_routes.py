@@ -25,11 +25,11 @@ from app.models import (
     MatchResult,
 )
 from app.admin_models import AdminLog, AdminGameRule, AdminPricingTemplate
-from app.db import SessionLocal
+from app.database import SessionLocal
 
 logger = logging.getLogger("admin_routes")
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 # ════════════════════════════════════════════════════════════════════════
 #  Modèles Pydantic
