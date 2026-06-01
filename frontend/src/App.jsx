@@ -56,29 +56,27 @@ function AppProvider({ children }) {
 
   // Initialisation au mount
   useEffect(() => {
-    const initApp = async () => {
-      try {
-        // Vérifier la session utilisateur
-        const res = await apiFetch("/auth/status");
-        if (res.ok) {
-          const userData = await res.json();
-          setUser(userData);
-
-          // Checker si les données ont changé
-          const newDataVersion = userData.data_version || "";
-          if (dataVersion && newDataVersion !== dataVersion) {
-            logger.warn(`🔄 Données mises à jour (v${newDataVersion})`);
-            // Invalider le cache du leaderboard
-            localStorage.removeItem("leaderboard_cache");
-            setDataVersion(newDataVersion);
-          }
-        }
-      } catch (err) {
-        logger.error("Init erreur:", err);
-      } finally {
-        setLoading(false);
+const initApp = async () => {
+  try {
+    // Récupérer la session depuis localStorage si elle existe
+    const token = localStorage.getItem("auth_token");
+    if (token) {
+      const res = await apiFetch("/auth/me", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const userData = await res.json();
+        setUser(userData);
+      } else {
+        localStorage.removeItem("auth_token");
       }
-    };
+    }
+  } catch (err) {
+    logger.error("Init erreur:", err);
+  } finally {
+    setLoading(false);
+  }
+};
 
     initApp();
   }, []);
