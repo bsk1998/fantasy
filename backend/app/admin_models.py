@@ -1,64 +1,81 @@
-"""Models spécifiques au mode Admin — configuration manuelle du jeu par l'admin."""
+"""
+admin_models.py — Modèles pour l'administration
+================================================
+Étend les modèles existants avec des champs supplémentaires.
+"""
 
-from sqlalchemy import Column, Integer, String, Float, Boolean, JSON, Text, DateTime
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey
 from datetime import datetime
-
-Base = declarative_base()
-
-
-class AdminSession(Base):
-    """Suivi des connexions admin — sécurité basique."""
-    __tablename__ = 'admin_sessions'
-    id = Column(Integer, primary_key=True, index=True)
-    token = Column(String, unique=True, index=True)  # JWT simple
-    created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=False)
-    is_active = Column(Boolean, default=True)
-
-
-class GameRules(Base):
-    """Règles du jeu — configurables par l'admin."""
-    __tablename__ = 'game_rules'
-    id = Column(Integer, primary_key=True, index=True)
-    rule_type = Column(String, index=True)  # 'fantasy_points', 'predictor_scores', 'predictor_tableau'
-    
-    # Fantasy Points : scores par action joueur/coach
-    # Structure JSON : {"G": {"match_complet": 2, "but": 4, ...}, ...}
-    rules_data = Column(JSON, nullable=False, default={})
-    
-    # Métadonnées
-    version = Column(Integer, default=1)  # Pour tracking des versions
-    created_by = Column(String, nullable=True)  # Admin email
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    is_active = Column(Boolean, default=True)
+from app.db import Base
 
 
 class AdminLog(Base):
-    """Log de toutes les actions admin — audit trail."""
-    __tablename__ = 'admin_logs'
-    id = Column(Integer, primary_key=True, index=True)
-    admin_email = Column(String, nullable=False)
-    action = Column(String)  # 'add_team', 'import_squad', 'set_coach', 'configure_rules', 'create_tournament'
-    target = Column(String, nullable=True)  # Ex: 'France', 'match_id_123'
-    details = Column(JSON, nullable=True)  # Détails de l'action (ancien/nouveau état)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    status = Column(String, default="success")  # 'success' ou 'error'
-    error_message = Column(Text, nullable=True)
+    """Logs des actions admin."""
+    __tablename__ = "admin_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action = Column(String, nullable=False)  # "add_team", "edit_player", etc.
+    target_type = Column(String, nullable=False)  # "team", "player", "coach", "match", "rule"
+    target_id = Column(String, nullable=True)
+    details = Column(Text, nullable=True)  # JSON ou description
+    admin_user = Column(String, default="admin")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<AdminLog {self.action} on {self.target_type}>"
 
 
-class TournamentMetadata(Base):
-    """Métadonnées du tournoi — créé par l'admin."""
-    __tablename__ = 'tournament_metadata'
-    id = Column(Integer, primary_key=True, index=True)
-    tournament_name = Column(String, unique=True)  # 'Coupe du Monde 2026'
-    official_url = Column(String, nullable=True)  # https://www.sofascore.com/...
-    source_screenshots = Column(JSON, default=[])  # Liste de URLs de captures
-    groups_structure = Column(JSON, default={})  # {"Groupe A": ["France", "Belgique", ...]}
+class AdminPricingTemplate(Base):
+    """Template de prix pour les joueurs (par position et performance)."""
+    __tablename__ = "admin_pricing_templates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position = Column(String, nullable=False)  # G, D, M, A
+    base_price = Column(Float, default=6.0)
     
-    # Tokens/clés si scraping manuel avec screenshots
-    groq_extraction_status = Column(String, default="pending")  # 'pending', 'success', 'error'
-    created_by = Column(String, nullable=True)
+    # Ajustements selon performance
+    adjustment_for_tier = Column(String, nullable=True)  # "elite", "strong", "regular", "emerging"
+    adjusted_price = Column(Float, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<PricingTemplate {self.position} : {self.base_price}>"
+
+
+class AdminGameRule(Base):
+    """Règles du jeu (barème fantasy, bonus/malus)."""
+    __tablename__ = "admin_game_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_name = Column(String, unique=True, nullable=False)  # "full_match_bonus", "goal", "yellow_card", etc.
+    description = Column(String, nullable=True)
+    position_affected = Column(String, nullable=True)  # "G|D|M|A" ou "ALL"
+    points_value = Column(Integer, nullable=False)  # Ex: +4 pour un but
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<Rule {self.rule_name} : {self.points_value}pt>"
+
+
+class AdminTournamentConfig(Base):
+    """Configuration du tournoi."""
+    __tablename__ = "admin_tournament_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tournament_name = Column(String, default="World Cup 2026")
+    start_date = Column(String, nullable=True)  # YYYY-MM-DD
+    end_date = Column(String, nullable=True)
+    
+    # Source externe (URL ou description)
+    external_data_source = Column(String, nullable=True)  # URL ou "manual_input"
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<TournamentConfig {self.tournament_name}>"

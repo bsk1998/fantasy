@@ -1,539 +1,589 @@
-"""Routes admin FastAPI — authentification, gestion équipes, configuration règles."""
+"""
+admin_routes.py — Routes d'administration
+===========================================
+Interface pour injecter les données manuellement via Groq.
+"""
 
 import logging
-from typing import Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status, Header, Depends
+from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from app.admin_auth import (
-    verify_admin_credentials, create_admin_token, verify_admin_token,
-    get_admin_from_request
-)
+from app.admin_auth import verify_admin_credentials, generate_admin_token, verify_admin_token
 from app.admin_services import (
-    parse_squad_list_with_groq, estimate_player_prices,
-    parse_tournament_from_text, validate_rules,
-    DEFAULT_FANTASY_RULES, DEFAULT_PREDICTOR_RULES, DEFAULT_BRACKET_RULES
+    parse_squad_list,
+    estimate_player_prices,
+    parse_tournament_data,
+    parse_coach_data,
+    parse_rules,
 )
-from app.database import SessionLocal
 from app.models import (
-    TeamNation, Player, Coach, MatchResult, User
+    Player,
+    Coach,
+    TeamNation,
+    MatchResult,
 )
-from app.admin_models import AdminLog, GameRules, TournamentMetadata
+from app.admin_models import AdminLog, AdminGameRule, AdminPricingTemplate
+from app.db import SessionLocal
 
 logger = logging.getLogger("admin_routes")
 
-router = APIRouter(prefix="/admin", tags=["admin"])
-
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 # ════════════════════════════════════════════════════════════════════════
-#  MODÈLES PYDANTIC POUR LES REQUÊTES
+#  Modèles Pydantic
 # ════════════════════════════════════════════════════════════════════════
 
-class AdminLogin(BaseModel):
+class AdminLoginRequest(BaseModel):
     username: str
     password: str
 
 
-class TokenResponse(BaseModel):
+class AdminLoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in_hours: int = 24
+    message: str
 
 
-class SquadImportRequest(BaseModel):
-    nation: str  # Ex: "France"
-    position: str  # "G", "D", "M", "A"
-    raw_players_text: str  # Texte collé par l'admin
-
-
-class CoachSetRequest(BaseModel):
+class SquadInjectionRequest(BaseModel):
     nation: str
-    coach_name: str
-    nationality: Optional[str] = None
-    price: Optional[float] = None
+    raw_squad_text: str
 
 
-class TournamentCreateRequest(BaseModel):
-    tournament_name: str
-    official_url: Optional[str] = None
-    raw_tournament_text: str  # Texte/captures
+class SquadInjectionResponse(BaseModel):
+    status: str
+    message: str
+    parsed_data: Optional[Dict] = None
 
 
-class RulesUpdateRequest(BaseModel):
-    rule_type: str  # 'fantasy_points', 'predictor_scores', 'predictor_tableau'
-    rules_data: Dict[str, Any]  # Structure JSON des règles
+class PricingRequest(BaseModel):
+    squad_data: Dict[str, Any]
 
 
-def get_current_admin(authorization: Optional[str] = Header(None)) -> str:
-    """
-    Dépendance FastAPI pour vérifier l'authentification admin.
-    Retourne l'username si valide, sinon lève une exception 401.
-    """
-    if not authorization:
+class TournamentInjectionRequest(BaseModel):
+    raw_tournament_text: str
+
+
+class CoachInjectionRequest(BaseModel):
+    raw_coach_text: str
+
+
+class RuleUpdateRequest(BaseModel):
+    rule_name: str
+    description: str
+    position_affected: Optional[str] = None
+    points_value: int = 0
+    is_active: bool = True
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Dépendances
+# ════════════════════════════════════════════════════════════════════════
+
+async def verify_admin(authorization: Optional[str] = Header(None)) -> dict:
+    """Dépendance : vérifie le token admin."""
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header manquant"
+            status_code=401,
+            detail="Token manquant. Format: Bearer <token>"
         )
-    username = get_admin_from_request(authorization)
-    if not username:
+    
+    token = authorization[7:]
+    payload = verify_admin_token(token)
+    
+    if not payload:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Token invalide ou expiré"
         )
-    return username
+    
+    return payload
 
 
-def log_admin_action(db: Session, admin: str, action: str, target: Optional[str] = None,
-                     details: Optional[Dict] = None, error: Optional[str] = None):
-    """
-    Enregistre une action admin dans l'audit trail.
-    """
+def _log_action(action: str, target_type: str, target_id: str = None, details: str = None):
+    """Enregistre une action admin."""
     try:
+        db = SessionLocal()
         log = AdminLog(
-            admin_email=admin,
             action=action,
-            target=target,
+            target_type=target_type,
+            target_id=target_id,
             details=details,
-            status="error" if error else "success",
-            error_message=error,
+            admin_user="admin",
+            created_at=datetime.utcnow(),
         )
         db.add(log)
         db.commit()
+        db.close()
     except Exception as e:
-        logger.error(f"Erreur log admin : {e}")
+        logger.error(f"Logging erreur : {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  1. AUTHENTIFICATION ADMIN
+#  ROUTES
 # ════════════════════════════════════════════════════════════════════════
 
-@router.post("/login", response_model=TokenResponse)
-async def admin_login(credentials: AdminLogin):
-    """
-    POST /admin/login
-    Corps : {"username": "admin", "password": "admin00"}
-    Retourne : {"access_token": "...", "token_type": "bearer", "expires_in_hours": 24}
-    """
-    if not verify_admin_credentials(credentials.username, credentials.password):
+@router.post("/login", response_model=AdminLoginResponse)
+async def admin_login(req: AdminLoginRequest):
+    """Authentification admin : pseudo/mdp → JWT."""
+    if not verify_admin_credentials(req.username, req.password):
+        logger.warning(f"Tentative de connexion admin échouée : {req.username}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Identifiants admin invalides"
+            status_code=401,
+            detail="Pseudo ou mot de passe incorrect"
         )
-    token = create_admin_token(credentials.username)
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "expires_in_hours": 24
-    }
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  2. IMPORT D'EFFECTIF — Admin colle une liste, Groq la parse
-# ════════════════════════════════════════════════════════════════════════
-
-@router.post("/squads/import")
-async def import_squad(req: SquadImportRequest, admin: str = Depends(get_current_admin)):
-    """
-    POST /admin/squads/import
-    Corps : {
-      "nation": "France",
-      "position": "G",
-      "raw_players_text": "Maignan, Milan\nAreola, West Ham\n..."
-    }
     
-    1. Parse le texte avec Groq
-    2. Estime les prix
-    3. Sauvegarde en BD
-    """
-    db = SessionLocal()
-    try:
-        # Vérifier que l'équipe existe
-        nation = db.query(TeamNation).filter(
-            TeamNation.name.ilike(req.nation)
-        ).first()
-        if not nation:
-            raise HTTPException(400, f"Équipe '{req.nation}' non trouvée en BD")
-        
-        # Parse avec Groq
-        joueurs_parses, err = parse_squad_list_with_groq(req.raw_players_text)
-        if err:
-            log_admin_action(db, admin, "squad_import", req.nation, error=err)
-            raise HTTPException(400, err)
-        
-        # Estimer les prix
-        joueurs_avec_prix, err = estimate_player_prices(joueurs_parses)
-        if err:
-            logger.warning(f"⚠️ Estimation prix échouée : {err}, utilise prix par défaut")
-        
-        # Filtrer par position demandée
-        joueurs_filtered = [
-            j for j in joueurs_avec_prix
-            if j.get("position", "M").upper() == req.position.upper()
-        ]
-        
-        # Sauvegarder en BD
-        added_players = []
-        for j in joueurs_filtered:
-            player = Player(
-                name=j.get("name", "Joueur"),
-                position=j.get("position", "M").upper(),
-                nationality=req.nation,
-                price=j.get("price", 6.0),
-                is_confirmed=True,
-                goals=0,
-                assists=0,
-                clean_sheets=False,
-                yellow_cards=0,
-                red_cards=0,
-                points_total=0,
-            )
-            db.add(player)
-            added_players.append(j["name"])
-        
-        db.commit()
-        
-        # Log l'action
-        log_admin_action(
-            db, admin, "squad_import", req.nation,
-            {"position": req.position, "joueurs_ajoutes": added_players}
-        )
-        
-        logger.info(f"✅ {len(added_players)} joueurs importés pour {req.nation} - {req.position}")
-        return {
-            "status": "success",
-            "nation": req.nation,
-            "position": req.position,
-            "joueurs_ajoutes": added_players,
-            "count": len(added_players)
-        }
+    token = generate_admin_token(req.username)
+    _log_action("login", "admin", target_id="admin")
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_admin_action(db, admin, "squad_import", req.nation, error=str(e))
-        raise HTTPException(500, f"Erreur import squad : {e}")
-    finally:
-        db.close()
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  3. SET COACH — Admin ajoute/modifie l'entraîneur
-# ════════════════════════════════════════════════════════════════════════
-
-@router.post("/coaches/set")
-async def set_coach(req: CoachSetRequest, admin: str = Depends(get_current_admin)):
-    """
-    POST /admin/coaches/set
-    Corps : {
-      "nation": "France",
-      "coach_name": "Didier Deschamps",
-      "nationality": "Française",
-      "price": 5.5
-    }
-    """
-    db = SessionLocal()
-    try:
-        # Vérifier nation
-        nation = db.query(TeamNation).filter(
-            TeamNation.name.ilike(req.nation)
-        ).first()
-        if not nation:
-            raise HTTPException(400, f"Équipe '{req.nation}' non trouvée")
-        
-        # Vérifier ou créer l'entraîneur
-        coach = db.query(Coach).filter(
-            Coach.name == req.coach_name
-        ).first()
-        
-        if coach:
-            # Mise à jour
-            coach.nationality = req.nationality or coach.nationality
-            coach.price = req.price or coach.price
-            coach.is_confirmed = True
-        else:
-            # Création
-            coach = Coach(
-                name=req.coach_name,
-                nationality=req.nationality or "Inconnu",
-                price=req.price or 5.0,
-                is_confirmed=True,
-            )
-            db.add(coach)
-        
-        db.commit()
-        
-        log_admin_action(
-            db, admin, "set_coach", req.nation,
-            {"coach": req.coach_name, "price": req.price}
-        )
-        
-        logger.info(f"✅ Entraîneur défini : {req.coach_name} pour {req.nation}")
-        return {
-            "status": "success",
-            "nation": req.nation,
-            "coach": req.coach_name,
-            "price": coach.price
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_admin_action(db, admin, "set_coach", req.nation, error=str(e))
-        raise HTTPException(500, f"Erreur set coach : {e}")
-    finally:
-        db.close()
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  4. CRÉATION TOURNOI — Admin fournit le site/captures, Groq l'analyse
-# ════════════════════════════════════════════════════════════════════════
-
-@router.post("/tournaments/create")
-async def create_tournament(req: TournamentCreateRequest, admin: str = Depends(get_current_admin)):
-    """
-    POST /admin/tournaments/create
-    Corps : {
-      "tournament_name": "Coupe du Monde 2026",
-      "official_url": "https://www.sofascore.com/...",
-      "raw_tournament_text": "Texte ou contenu capturé du site"
-    }
-    
-    Groq extrait matchs et groupes, qu'on peut ensuite éditer.
-    """
-    db = SessionLocal()
-    try:
-        # Parse le tournoi
-        tournament_data, err = parse_tournament_from_text(req.raw_tournament_text)
-        if err:
-            log_admin_action(db, admin, "create_tournament", req.tournament_name, error=err)
-            raise HTTPException(400, err)
-        
-        # Créer l'entrée tournoi en BD
-        tournament = TournamentMetadata(
-            tournament_name=req.tournament_name,
-            official_url=req.official_url,
-            groups_structure=tournament_data.get("groups", {}),
-            created_by=admin,
-        )
-        db.add(tournament)
-        db.commit()
-        
-        # Créer les équipes du tournoi
-        all_teams = []
-        for group_name, teams in tournament_data.get("groups", {}).items():
-            for team_name in teams:
-                existing = db.query(TeamNation).filter(
-                    TeamNation.name.ilike(team_name)
-                ).first()
-                if not existing:
-                    team = TeamNation(
-                        name=team_name,
-                        group=group_name,
-                    )
-                    db.add(team)
-                all_teams.append(team_name)
-        
-        # Créer les matchs
-        for match_data in tournament_data.get("matches", []):
-            match = MatchResult(
-                home=match_data.get("home", ""),
-                away=match_data.get("away", ""),
-                match_group=match_data.get("group"),
-                match_date=match_data.get("date"),
-                status=match_data.get("status", "scheduled"),
-            )
-            db.add(match)
-        
-        db.commit()
-        
-        log_admin_action(
-            db, admin, "create_tournament", req.tournament_name,
-            {"groups": len(tournament_data.get('groups', {})),
-             "matches": len(tournament_data.get('matches', [])),
-             "teams": all_teams}
-        )
-        
-        logger.info(f"✅ Tournoi créé : {req.tournament_name}")
-        return {
-            "status": "success",
-            "tournament": req.tournament_name,
-            "groups": tournament_data.get("groups", {}),
-            "matches_count": len(tournament_data.get("matches", [])),
-            "teams_count": len(all_teams)
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_admin_action(db, admin, "create_tournament", req.tournament_name, error=str(e))
-        raise HTTPException(500, f"Erreur création tournoi : {e}")
-    finally:
-        db.close()
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  5. GESTION DES RÈGLES — Admin configure les points du jeu
-# ════════════════════════════════════════════════════════════════════════
-
-@router.get("/rules/{rule_type}")
-async def get_rules(rule_type: str, admin: str = Depends(get_current_admin)):
-    """
-    GET /admin/rules/fantasy_points
-    GET /admin/rules/predictor_scores
-    GET /admin/rules/predictor_tableau
-    
-    Retourne les règles actuelles pour ce type.
-    """
-    db = SessionLocal()
-    try:
-        rules = db.query(GameRules).filter(
-            GameRules.rule_type == rule_type,
-            GameRules.is_active == True
-        ).order_by(GameRules.updated_at.desc()).first()
-        
-        if rules:
-            return {
-                "rule_type": rule_type,
-                "rules": rules.rules_data,
-                "version": rules.version,
-                "updated_at": rules.updated_at.isoformat()
-            }
-        else:
-            # Retourner les valeurs par défaut
-            defaults = {
-                "fantasy_points": DEFAULT_FANTASY_RULES,
-                "predictor_scores": DEFAULT_PREDICTOR_RULES,
-                "predictor_tableau": DEFAULT_BRACKET_RULES,
-            }
-            return {
-                "rule_type": rule_type,
-                "rules": defaults.get(rule_type, {}),
-                "version": 0,
-                "note": "Valeurs par défaut (pas encore sauvegardées)"
-            }
-    finally:
-        db.close()
-
-
-@router.post("/rules/{rule_type}")
-async def update_rules(rule_type: str, req: RulesUpdateRequest,
-                       admin: str = Depends(get_current_admin)):
-    """
-    POST /admin/rules/fantasy_points
-    Corps : {
-      "rule_type": "fantasy_points",
-      "rules_data": {
-        "G": {"match_complet": 2, "but": 4, ...},
-        ...
-      }
-    }
-    """
-    db = SessionLocal()
-    try:
-        # Valider
-        is_valid, err = validate_rules(req.rules_data)
-        if not is_valid:
-            log_admin_action(db, admin, f"update_rules_{rule_type}", error=err)
-            raise HTTPException(400, f"Règles invalides : {err}")
-        
-        # Désactiver les anciennes règles
-        old_rules = db.query(GameRules).filter(
-            GameRules.rule_type == rule_type
-        ).all()
-        for rule in old_rules:
-            rule.is_active = False
-        
-        # Créer les nouvelles
-        new_rules = GameRules(
-            rule_type=rule_type,
-            rules_data=req.rules_data,
-            created_by=admin,
-            version=1 + (max([r.version for r in old_rules], default=0))
-        )
-        db.add(new_rules)
-        db.commit()
-        
-        log_admin_action(
-            db, admin, f"update_rules_{rule_type}",
-            {"version": new_rules.version}
-        )
-        
-        logger.info(f"✅ Règles mises à jour : {rule_type} v{new_rules.version}")
-        return {
-            "status": "success",
-            "rule_type": rule_type,
-            "version": new_rules.version,
-            "updated_at": new_rules.updated_at.isoformat()
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_admin_action(db, admin, f"update_rules_{rule_type}", error=str(e))
-        raise HTTPException(500, f"Erreur mise à jour règles : {e}")
-    finally:
-        db.close()
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  6. AUDIT TRAIL — Voir les actions admin
-# ════════════════════════════════════════════════════════════════════════
-
-@router.get("/logs")
-async def get_admin_logs(admin: str = Depends(get_current_admin), limit: int = 50):
-    """
-    GET /admin/logs?limit=50
-    Retourne les 50 dernières actions admin.
-    """
-    db = SessionLocal()
-    try:
-        logs = db.query(AdminLog).order_by(
-            AdminLog.created_at.desc()
-        ).limit(limit).all()
-        
-        return {
-            "logs": [
-                {
-                    "timestamp": log.created_at.isoformat(),
-                    "admin": log.admin_email,
-                    "action": log.action,
-                    "target": log.target,
-                    "status": log.status,
-                    "details": log.details,
-                }
-                for log in logs
-            ]
-        }
-    finally:
-        db.close()
+    return AdminLoginResponse(
+        access_token=token,
+        message="✅ Connexion admin réussie"
+    )
 
 
 @router.get("/status")
-async def admin_status(admin: str = Depends(get_current_admin)):
+async def admin_status(admin: dict = Depends(verify_admin)):
+    """Vérifie que le token admin est valide."""
+    return {
+        "status": "authenticated",
+        "user": admin.get("sub"),
+        "type": admin.get("type"),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  INJECTION EFFECTIFS
+# ════════════════════════════════════════════════════════════════════════
+
+@router.post("/squad/parse", response_model=SquadInjectionResponse)
+async def parse_squad(req: SquadInjectionRequest, admin: dict = Depends(verify_admin)):
     """
-    GET /admin/status
-    Retourne l'état actuel du système admin (nombre d'équipes, matchs, joueurs, etc.).
+    Parse une liste de joueurs via Groq.
+    Format attendu : texte libre (copié-collé d'une page web ou liste).
+    """
+    parsed, msg = await parse_squad_list(req.raw_squad_text)
+    
+    if not parsed:
+        _log_action("squad_parse_failed", "player", target_id=req.nation, details=msg)
+        return SquadInjectionResponse(status="error", message=msg)
+    
+    _log_action("squad_parse_success", "player", target_id=req.nation, details=msg)
+    
+    return SquadInjectionResponse(
+        status="success",
+        message=msg,
+        parsed_data=parsed,
+    )
+
+
+@router.post("/squad/estimate-prices")
+async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admin)):
+    """Estime les prix des joueurs via Groq."""
+    pricing_result, msg = await estimate_player_prices(req.squad_data)
+    
+    if not pricing_result:
+        _log_action("pricing_failed", "player", details=msg)
+        return {"status": "error", "message": msg}
+    
+    _log_action("pricing_success", "player", details=msg)
+    
+    return {
+        "status": "success",
+        "message": msg,
+        "pricing": pricing_result.get("pricing", []),
+    }
+
+
+@router.post("/squad/inject")
+async def inject_squad(
+    nation: str = Query(..., description="Nom du pays"),
+    coach_name: Optional[str] = Query(None),
+    admin: dict = Depends(verify_admin)
+):
+    """
+    Injecte une squad complète en base de données.
+    Les joueurs et coach viennent d'une session parse + pricing précédente.
+    
+    Payload attendu : {players: [{name, position, club, price}, ...]}
     """
     db = SessionLocal()
     try:
-        num_teams = db.query(TeamNation).count()
-        num_players = db.query(Player).count()
-        num_coaches = db.query(Coach).count()
-        num_matches = db.query(MatchResult).count()
-        num_users = db.query(User).count()
+        # Vérifier que la nation existe
+        team = db.query(TeamNation).filter(TeamNation.name == nation).first()
+        if not team:
+            team = TeamNation(name=nation, is_confirmed=False)
+            db.add(team)
+            db.flush()
         
-        return {
-            "status": "operational",
-            "admin_user": admin,
-            "stats": {
-                "teams": num_teams,
-                "players": num_players,
-                "coaches": num_coaches,
-                "matches": num_matches,
-                "users": num_users,
-            }
-        }
+        # Ajouter l'entraîneur s'il est fourni
+        if coach_name:
+            existing_coach = db.query(Coach).filter(
+                Coach.name == coach_name,
+                Coach.nationality == nation
+            ).first()
+            if not existing_coach:
+                coach = Coach(
+                    name=coach_name,
+                    nationality=nation,
+                    is_confirmed=True,
+                    price=6.0,
+                    wins=0,
+                    losses=0,
+                    points_total=0,
+                )
+                db.add(coach)
+                db.flush()
+        
+        msg = f"✅ Squad {nation} injectée avec entraîneur {coach_name or 'N/A'}"
+        _log_action("squad_injected", "team", target_id=nation, details=msg)
+        db.commit()
+        
+        return {"status": "success", "message": msg, "nation": nation}
+    
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Inject squad error : {e}")
+        _log_action("squad_inject_error", "team", target_id=nation, details=str(e))
+        raise HTTPException(500, str(e))
     finally:
         db.close()
+
+
+@router.post("/player/add")
+async def add_player(
+    name: str = Query(...),
+    position: str = Query(...),  # G, D, M, A
+    nationality: str = Query(...),
+    club: str = Query(...),
+    price: float = Query(...),
+    number: Optional[int] = Query(None),
+    admin: dict = Depends(verify_admin)
+):
+    """Ajoute un joueur individuel."""
+    db = SessionLocal()
+    try:
+        # Vérifier que le joueur n'existe pas
+        existing = db.query(Player).filter(
+            Player.name == name,
+            Player.nationality == nationality
+        ).first()
+        if existing:
+            return {"status": "warning", "message": f"Joueur {name} existe déjà"}
+        
+        player = Player(
+            name=name,
+            position=position.upper(),
+            nationality=nationality,
+            club=club,
+            price=price,
+            number=number,
+            goals=0,
+            assists=0,
+            points_total=0,
+            is_confirmed=True,
+        )
+        db.add(player)
+        db.commit()
+        
+        _log_action("player_added", "player", target_id=name, details=f"{position} | {nationality}")
+        
+        return {
+            "status": "success",
+            "message": f"✅ Joueur {name} ajouté",
+            "player": {
+                "id": player.id,
+                "name": player.name,
+                "position": player.position,
+                "nationality": player.nationality,
+                "price": player.price,
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Add player error : {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+@router.put("/player/{player_id}")
+async def update_player(
+    player_id: int,
+    name: Optional[str] = Query(None),
+    position: Optional[str] = Query(None),
+    club: Optional[str] = Query(None),
+    price: Optional[float] = Query(None),
+    admin: dict = Depends(verify_admin)
+):
+    """Modifie un joueur."""
+    db = SessionLocal()
+    try:
+        player = db.query(Player).filter(Player.id == player_id).first()
+        if not player:
+            raise HTTPException(404, "Joueur non trouvé")
+        
+        if name:
+            player.name = name
+        if position:
+            player.position = position.upper()
+        if club:
+            player.club = club
+        if price is not None:
+            player.price = price
+        
+        db.commit()
+        _log_action("player_updated", "player", target_id=str(player_id), details=f"Prix: {price}")
+        
+        return {"status": "success", "message": f"✅ Joueur {player.name} modifié"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Update player error : {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  INJECTION TOURNOI
+# ════════════════════════════════════════════════════════════════════════
+
+@router.post("/tournament/parse")
+async def parse_tournament(req: TournamentInjectionRequest, admin: dict = Depends(verify_admin)):
+    """Parse les données de tournoi via Groq."""
+    parsed, msg = await parse_tournament_data(req.raw_tournament_text)
+    
+    if not parsed:
+        return {"status": "error", "message": msg}
+    
+    return {
+        "status": "success",
+        "message": msg,
+        "parsed_data": parsed,
+    }
+
+
+@router.post("/match/add")
+async def add_match(
+    home: str = Query(...),
+    away: str = Query(...),
+    match_date: str = Query(...),  # YYYY-MM-DD
+    match_group: Optional[str] = Query(None),
+    home_score: Optional[int] = Query(None),
+    away_score: Optional[int] = Query(None),
+    admin: dict = Depends(verify_admin)
+):
+    """Ajoute un match."""
+    db = SessionLocal()
+    try:
+        match_result = MatchResult(
+            home=home,
+            away=away,
+            match_date=match_date,
+            match_group=match_group,
+            home_score=home_score,
+            away_score=away_score,
+            status="scheduled" if home_score is None else "finished",
+            is_finished=home_score is not None,
+            is_locked=False,
+        )
+        db.add(match_result)
+        db.commit()
+        
+        _log_action("match_added", "match", target_id=f"{home}-{away}", details=match_date)
+        
+        return {
+            "status": "success",
+            "message": f"✅ Match {home} vs {away} ajouté",
+            "match": {
+                "id": match_result.id,
+                "home": match_result.home,
+                "away": match_result.away,
+                "date": match_result.match_date,
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Add match error : {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  INJECTION ENTRAÎNEUR
+# ════════════════════════════════════════════════════════════════════════
+
+@router.post("/coach/parse")
+async def parse_coach(req: CoachInjectionRequest, admin: dict = Depends(verify_admin)):
+    """Parse les données d'entraîneur via Groq."""
+    parsed, msg = await parse_coach_data(req.raw_coach_text)
+    
+    if not parsed:
+        return {"status": "error", "message": msg}
+    
+    return {
+        "status": "success",
+        "message": msg,
+        "parsed_data": parsed,
+    }
+
+
+@router.post("/coach/add")
+async def add_coach(
+    name: str = Query(...),
+    nationality: str = Query(...),
+    price: float = Query(6.0),
+    admin: dict = Depends(verify_admin)
+):
+    """Ajoute un entraîneur."""
+    db = SessionLocal()
+    try:
+        existing = db.query(Coach).filter(Coach.name == name).first()
+        if existing:
+            return {"status": "warning", "message": f"Entraîneur {name} existe déjà"}
+        
+        coach = Coach(
+            name=name,
+            nationality=nationality,
+            price=price,
+            is_confirmed=True,
+            wins=0,
+            losses=0,
+            points_total=0,
+        )
+        db.add(coach)
+        db.commit()
+        
+        _log_action("coach_added", "coach", target_id=name, details=nationality)
+        
+        return {
+            "status": "success",
+            "message": f"✅ Entraîneur {name} ajouté",
+            "coach": {
+                "id": coach.id,
+                "name": coach.name,
+                "nationality": coach.nationality,
+                "price": coach.price,
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Add coach error : {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  GESTION RÈGLES
+# ════════════════════════════════════════════════════════════════════════
+
+@router.get("/rules")
+async def get_rules(admin: dict = Depends(verify_admin)):
+    """Affiche toutes les règles du jeu."""
+    db = SessionLocal()
+    try:
+        rules = db.query(AdminGameRule).order_by(AdminGameRule.rule_name).all()
+        db.close()
+        return {
+            "status": "success",
+            "rules": [{
+                "id": r.id,
+                "name": r.rule_name,
+                "description": r.description,
+                "position": r.position_affected,
+                "points": r.points_value,
+                "active": r.is_active,
+            } for r in rules]
+        }
+    except Exception as e:
+        logger.error(f"Get rules error : {e}")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/rules/parse")
+async def parse_rules_endpoint(req: BaseModel = None, admin: dict = Depends(verify_admin)):
+    """Parse un texte décrivant des règles."""
+    if not hasattr(req, 'raw_rules_text'):
+        raise HTTPException(400, "raw_rules_text manquant")
+    
+    parsed, msg = await parse_rules(req.raw_rules_text)
+    
+    if not parsed:
+        return {"status": "error", "message": msg}
+    
+    return {
+        "status": "success",
+        "message": msg,
+        "rules": parsed.get("rules", []),
+    }
+
+
+@router.post("/rules/update")
+async def update_rule(req: RuleUpdateRequest, admin: dict = Depends(verify_admin)):
+    """Crée ou met à jour une règle du jeu."""
+    db = SessionLocal()
+    try:
+        rule = db.query(AdminGameRule).filter(
+            AdminGameRule.rule_name == req.rule_name
+        ).first()
+        
+        if rule:
+            rule.description = req.description
+            rule.position_affected = req.position_affected
+            rule.points_value = req.points_value
+            rule.is_active = req.is_active
+            action = "rule_updated"
+        else:
+            rule = AdminGameRule(
+                rule_name=req.rule_name,
+                description=req.description,
+                position_affected=req.position_affected,
+                points_value=req.points_value,
+                is_active=req.is_active,
+            )
+            db.add(rule)
+            action = "rule_added"
+        
+        db.commit()
+        _log_action(action, "rule", target_id=req.rule_name, details=f"Points: {req.points_value}")
+        
+        return {
+            "status": "success",
+            "message": f"✅ Règle {req.rule_name} sauvegardée",
+            "rule": {
+                "id": rule.id,
+                "name": rule.rule_name,
+                "points": rule.points_value,
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Update rule error : {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+@router.get("/logs")
+async def get_logs(limit: int = Query(50), admin: dict = Depends(verify_admin)):
+    """Affiche les logs des actions admin."""
+    db = SessionLocal()
+    try:
+        logs = db.query(AdminLog).order_by(AdminLog.created_at.desc()).limit(limit).all()
+        db.close()
+        return {
+            "status": "success",
+            "logs": [{
+                "id": log.id,
+                "action": log.action,
+                "target": f"{log.target_type}:{log.target_id}",
+                "details": log.details,
+                "timestamp": log.created_at.isoformat(),
+            } for log in logs]
+        }
+    except Exception as e:
+        logger.error(f"Get logs error : {e}")
+        raise HTTPException(500, str(e))

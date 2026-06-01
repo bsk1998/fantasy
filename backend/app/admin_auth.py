@@ -1,79 +1,58 @@
-"""Authentification admin simple et sécurisée (JWT basique)."""
+"""
+admin_auth.py — Authentification admin basique
+================================================
+Pseudo : admin
+Mot de passe : admin00
+
+Génère un JWT simple valide pour 24h.
+"""
 
 import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-import secrets
-import hashlib
-from fastapi import HTTPException, status
-from jose import JWTError, jwt
+import jwt
 
 logger = logging.getLogger("admin_auth")
 
-# Credentials admin codés en dur pour démo — à remplacer par DB en production
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin00")
-ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "super-secret-admin-key-change-in-production")
-ADMIN_TOKEN_EXPIRY = int(os.getenv("ADMIN_TOKEN_EXPIRY_HOURS", "24"))  # heures
-
-
-def hash_password(password: str) -> str:
-    """Hash simple du mot de passe (SHA256)."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    """Vérifie le mot de passe."""
-    return hash_password(plain) == hashed
+ADMIN_SECRET = os.getenv("ADMIN_SECRET_KEY", "fantasy-boulzazen-secret-2026-xyz")
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin00"
+ADMIN_JWT_EXPIRY_HOURS = 24
 
 
 def verify_admin_credentials(username: str, password: str) -> bool:
-    """Vérifie les identifiants admin."""
-    if username != ADMIN_USERNAME:
-        logger.warning(f"❌ Tentative login admin avec username invalide : {username}")
-        return False
-    if password != ADMIN_PASSWORD:  # Comparaison simple pour démo
-        logger.warning(f"❌ Tentative login admin avec mot de passe invalide")
-        return False
-    logger.info(f"✅ Admin login réussi : {username}")
-    return True
+    """Vérifie pseudo/mdp admin."""
+    return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
 
 
-def create_admin_token(username: str) -> str:
-    """Crée un JWT pour l'admin."""
+def generate_admin_token(username: str) -> str:
+    """Génère un JWT valide 24h."""
     payload = {
         "sub": username,
         "type": "admin",
-        "exp": datetime.utcnow() + timedelta(hours=ADMIN_TOKEN_EXPIRY),
+        "exp": datetime.utcnow() + timedelta(hours=ADMIN_JWT_EXPIRY_HOURS),
         "iat": datetime.utcnow(),
     }
-    token = jwt.encode(payload, ADMIN_SECRET_KEY, algorithm="HS256")
-    logger.info(f"✅ Token admin créé pour : {username}")
-    return token
+    return jwt.encode(payload, ADMIN_SECRET, algorithm="HS256")
 
 
-def verify_admin_token(token: str) -> Optional[str]:
-    """
-    Vérifie un JWT admin et retourne le username si valide.
-    Retourne None si invalide ou expiré.
-    """
+def verify_admin_token(token: str) -> Optional[dict]:
+    """Vérifie et décode le JWT. Retourne le payload ou None."""
     try:
-        payload = jwt.decode(token, ADMIN_SECRET_KEY, algorithms=["HS256"])
-        if payload.get("type") != "admin":
-            return None
-        return payload.get("sub")
-    except JWTError as e:
-        logger.warning(f"❌ Token admin invalide : {e}")
-        return None
+        payload = jwt.decode(token, ADMIN_SECRET, algorithms=["HS256"])
+        if payload.get("type") == "admin":
+            return payload
+    except jwt.ExpiredSignatureError:
+        logger.warning("Admin token expiré")
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Admin token invalide : {e}")
+    return None
 
 
-def get_admin_from_request(authorization_header: str) -> Optional[str]:
-    """
-    Extrait et valide le token admin du header 'Authorization: Bearer <token>'.
-    Retourne l'username si valide, None sinon.
-    """
-    if not authorization_header or not authorization_header.startswith("Bearer "):
-        return None
-    token = authorization_header[7:]
-    return verify_admin_token(token)
+def check_admin_token(auth_header: Optional[str]) -> bool:
+    """Extrait et vérifie le token du header Authorization."""
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return False
+    token = auth_header[7:]
+    return verify_admin_token(token) is not None
