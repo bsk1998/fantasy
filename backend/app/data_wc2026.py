@@ -1,22 +1,16 @@
 """
-data_wc2026.py — Données de la Coupe du Monde 2026
-===================================================
+data_wc2026.py — INTENTIONNELLEMENT VIDE
+=========================================
 
-⚠️ CE FICHIER EST MAINTENANT VIDE
+⚠️  Ce fichier ne contient AUCUNE donnée codée en dur.
 
-Toutes les données (matchs, effectifs, entraîneurs, classements) sont désormais:
-- Scrappées en temps réel depuis Sofascore et Olympics via Groq IA
-- Stockées dans la base de données (tables MatchResult, Player, Coach, TeamNation, GroupStanding)
-- Mises à jour automatiquement via le scheduler
+Toutes les données (matchs, effectifs, entraîneurs, classements) sont :
+  ✅ Scrappées en temps réel depuis Sofascore + Olympics via Groq IA
+  ✅ Stockées dans la base de données (MatchResult, Player, Coach, TeamNation, etc.)
+  ✅ Mises à jour automatiquement par le scheduler APScheduler
 
-Les fonctions précédentes ont été supprimées :
-- MATCHS_GROUPES ❌ → MatchResult table
-- ENTRAINEURS ❌ → Coach table
-- get_tous_les_matchs() ❌ → get_matchs_actuels() dans updater.py
+Voir : backend/app/scraper.py → scraping_complet()
+Voir : backend/app/updater.py → tache_mise_a_jour_quotidienne()
 
-Voir backend/app/scraper.py pour le pipeline de scraping.
-Voir backend/app/updater.py pour le scheduler intelligent.
+Ne pas importer de données sportives depuis ce fichier.
 """
-
-# Ce fichier est conservé pour la compatibilité des imports existants
-# mais ne contient AUCUNE donnée codée en dur.

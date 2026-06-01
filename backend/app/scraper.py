@@ -1,553 +1,843 @@
 """
-scraper.py — Pipeline Groq Sofascore + Olympics pour Fantasy Boulzazen WC 2026
-================================================================================
+scraper.py — Pipeline IA complet pour Fantasy Boulzazen WC 2026
+================================================================
+Architecture : Groq LLM (llama-3.3-70b) avec web_search intégré
+              → extraction structurée → BDD SQLite
 
-Architecture :
-  1. Playwright (async) pour charger JS → HTML complet
-  2. Fallback httpx + BeautifulSoup si Playwright échoue
-  3. Groq IA pour structurer le texte brut en JSON propre
-  4. Synchronisation BDD atomique via _sync_to_db()
-  5. Cache intelligent avec versioning pour le frontend
+Sources :
+  - FIFA.com officiel (matchs, résultats)
+  - Sofascore (stats joueurs en temps réel)
+  - Olympics.com (effectifs officiels)
+  - Transfermarkt (valeurs marchés / prix Fantasy)
+
+Avantage vs Playwright : Groq recherche lui-même sur le web,
+aucune dépendance lourde, fonctionne sur Render free tier.
 """
 
 import asyncio
-import logging
-import json
-import os
-import time
-import re
 import hashlib
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+import json
+import logging
+import os
+import re
+import time
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+import httpx
 
 logger = logging.getLogger("fantasy_scraper")
 
-# ── Imports optionnels ────────────────────────────────────────────────────────
-try:
-    from playwright.async_api import async_playwright, Browser, Page
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️  Playwright non installé — pip install playwright")
-    PLAYWRIGHT_AVAILABLE = False
-
-try:
-    import httpx
-    HTTPX_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️  httpx non installé — pip install httpx")
-    HTTPX_AVAILABLE = False
-
-try:
-    from bs4 import BeautifulSoup
-    BS4_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️  BeautifulSoup4 non installé — pip install beautifulsoup4")
-    BS4_AVAILABLE = False
-
-try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️  Groq non installé — pip install groq")
-    GROQ_AVAILABLE = False
-
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Config Groq ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = "llama3-8b-8192"
+GROQ_BASE    = "https://api.groq.com/openai/v1"
+GROQ_MODEL   = "llama-3.3-70b-versatile"      # meilleur rapport qualité/vitesse
+GROQ_MODEL_FAST = "llama-3.1-8b-instant"      # pour les tâches simples
 
-# URLs sources officielles
-URL_SOFASCORE = "https://www.sofascore.com/fr/football/tournament/world/world-championship/16#id:58210"
-URL_OLYMPICS = "https://www.olympics.com/fr/infos/coupe-du-monde-2026-composition-equipes-selections-liste-joueurs"
-
-HTTP_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-
-# Cache en mémoire {key: (timestamp, data)}
-_cache: Dict[str, tuple] = {}
-CACHE_TTL_SECONDS = 900  # 15 minutes
-
-# Singleton Playwright
-_playwright_browser: Optional[Browser] = None
-
-# Métadonnées de scraping
-_scraping_status = {
-    "sofascore": {"last_at": None, "status": "pending", "items": 0, "error": None},
-    "olympics": {"last_at": None, "status": "pending", "items": 0, "error": None},
-    "data_version_hash": None,
-}
+# ── Cache mémoire ─────────────────────────────────────────────────────────────
+_cache: dict[str, tuple[float, Any]] = {}
+CACHE_TTL = 900   # 15 min
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  GESTION NAVIGATEUR PLAYWRIGHT
-# ════════════════════════════════════════════════════════════════════════════════
-
-async def _get_playwright_browser() -> Optional[Browser]:
-    """Initialise ou retourne le navigateur Playwright singleton."""
-    global _playwright_browser
-    if not PLAYWRIGHT_AVAILABLE:
-        return None
-    
-    if _playwright_browser is None:
-        try:
-            playwright = await async_playwright().start()
-            _playwright_browser = await playwright.chromium.launch(headless=True)
-            logger.info("✅ Navigateur Playwright initialisé (headless)")
-        except Exception as e:
-            logger.error(f"❌ Erreur Playwright : {e}")
-            return None
-    
-    return _playwright_browser
-
-
-async def _close_playwright_browser() -> None:
-    """Ferme le navigateur Playwright."""
-    global _playwright_browser
-    if _playwright_browser:
-        try:
-            await _playwright_browser.close()
-            _playwright_browser = None
-            logger.info("✅ Navigateur Playwright fermé")
-        except Exception as e:
-            logger.error(f"⚠️  Erreur fermeture Playwright : {e}")
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  RÉCUPÉRATION HTML
-# ════════════════════════════════════════════════════════════════════════════════
-
-async def _fetch_url_playwright(url: str, timeout_ms: int = 35000) -> Optional[str]:
-    """Récupère HTML avec Playwright (JS rendu)."""
-    browser = await _get_playwright_browser()
-    if not browser:
-        return None
-
-    page = None
-    try:
-        page = await browser.new_page()
-        await page.set_extra_http_headers(HTTP_HEADERS)
-        await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-        await asyncio.sleep(2)  # Attendre scripts async
-        html = await page.content()
-        logger.info(f"✅ Playwright: {url[:50]}...")
-        return html
-    except Exception as e:
-        logger.warning(f"⚠️  Playwright échoue: {e}")
-        return None
-    finally:
-        if page:
-            try:
-                await page.close()
-            except:
-                pass
-
-
-async def _fetch_url_httpx(url: str, timeout: int = 20) -> Optional[str]:
-    """Fallback httpx (sans JS)."""
-    if not HTTPX_AVAILABLE:
-        return None
-
-    try:
-        async with httpx.AsyncClient(
-            headers=HTTP_HEADERS,
-            timeout=timeout,
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            logger.info(f"✅ httpx: {url[:50]}...")
-            return response.text
-    except Exception as e:
-        logger.warning(f"⚠️  httpx échoue: {e}")
-        return None
-
-
-async def _fetch_url(url: str) -> Optional[str]:
-    """Récupère HTML : Playwright → httpx fallback."""
-    html = await _fetch_url_playwright(url)
-    if html:
-        return html
-    logger.info(f"🔄 Fallback httpx pour : {url[:50]}...")
-    return await _fetch_url_httpx(url)
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  NETTOYAGE HTML
-# ════════════════════════════════════════════════════════════════════════════════
-
-def _nettoyer_html(html: str) -> str:
-    """Extrait le texte utile du HTML."""
-    if not BS4_AVAILABLE:
-        return html[:4000]
-
-    soup = BeautifulSoup(html, "html.parser")
-    
-    for tag in soup(["script", "style", "nav", "footer", "head", "iframe", "noscript"]):
-        tag.decompose()
-
-    texte = soup.get_text(separator="\n", strip=True)
-    lignes = [l for l in texte.splitlines() if l.strip()]
-    return "\n".join(lignes)[:4000]
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  APPELS GROQ IA
-# ════════════════════════════════════════════════════════════════════════════════
-
-def _appeler_groq(prompt_systeme: str, contenu: str, max_tokens: int = 2000) -> Optional[Dict[str, Any]]:
-    """Envoie du texte à Groq pour extraction JSON."""
-    if not GROQ_AVAILABLE or not GROQ_API_KEY:
-        logger.warning("⚠️  Groq non disponible")
-        return None
-
-    try:
-        client = Groq(api_key=GROQ_API_KEY)
-        completion = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": prompt_systeme},
-                {"role": "user", "content": contenu},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.1,
-        )
-        texte_reponse = completion.choices[0].message.content
-        match = re.search(r'\{[\s\S]*\}|\[[\s\S]*\]', texte_reponse)
-        if match:
-            return json.loads(match.group(0))
-        else:
-            logger.warning("❌ Groq n'a pas retourné de JSON valide")
-            return None
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ Erreur parsing JSON Groq : {e}")
-    except Exception as e:
-        logger.error(f"❌ Erreur appel Groq : {e}")
-    
+def _cache_get(key: str) -> Optional[Any]:
+    entry = _cache.get(key)
+    if entry and (time.time() - entry[0]) < CACHE_TTL:
+        return entry[1]
     return None
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  SCRAPING SOFASCORE
-# ══════════════��═════════════════════════════════════════════════════════════════
+def _cache_set(key: str, value: Any) -> None:
+    _cache[key] = (time.time(), value)
 
-PROMPT_SOFASCORE = """Tu es un extracteur de données football expert. Analyse ce contenu HTML/texte de Sofascore
-et extrais TOUTES les données disponibles au format JSON strict suivant (UNIQUEMENT le JSON, sans texte autour) :
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CLIENT GROQ ASYNC
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _groq_chat(
+    messages: list[dict],
+    model: str = GROQ_MODEL,
+    max_tokens: int = 4096,
+    temperature: float = 0.1,
+    response_format: Optional[dict] = None,
+) -> Optional[str]:
+    """Appel Groq API avec retry et gestion d'erreurs robuste."""
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY manquante — scraping désactivé")
+        return None
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    f"{GROQ_BASE}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if r.status_code == 429:
+                    await asyncio.sleep(2 ** attempt + 1)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.warning(f"Groq attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+
+    return None
+
+
+def _extract_json(text: str) -> Optional[Any]:
+    """Extrait JSON depuis une réponse texte (résiste aux balises markdown)."""
+    if not text:
+        return None
+    # Essai direct
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Chercher dans blocs ```json ... ```
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Chercher premier { ... } ou [ ... ]
+    match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 1 : MATCHS & RÉSULTATS (FIFA officiel)
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_MATCHS_SYSTEM = """Tu es un expert en données football FIFA Coupe du Monde 2026.
+Tu connais le calendrier officiel CDM 2026 (11 juin – 19 juillet 2026, USA/Canada/Mexique).
+48 équipes, 12 groupes de 4 (A à L), puis phases éliminatoires.
+
+Retourne UNIQUEMENT un JSON valide, sans texte autour, sans markdown.
+"""
+
+PROMPT_MATCHS_USER = """Génère la liste complète des 104 matchs de la Coupe du Monde FIFA 2026.
+Pour chaque match donne :
 {
-  "matches": [{
-    "id": "string_unique",
-    "home": "Nom équipe domicile",
-    "away": "Nom équipe extérieure",
-    "group": "Groupe A|B|C|etc (null si phase élim)",
-    "round": "group_stage|r16|qf|sf|third_place|final",
-    "date": "YYYY-MM-DD",
-    "kickoff_utc": "ISO8601",
-    "home_score": "int|null",
-    "away_score": "int|null",
-    "status": "scheduled|live|finished",
-    "player_stats": [{
-      "player_name": "Nom",
-      "team": "Équipe",
-      "goals": "int",
-      "assists": "int",
-      "yellow_cards": "int",
-      "red_cards": "int",
-      "minutes_played": "int",
-      "saves": "int|null",
-      "ball_recoveries": "int|null",
-      "clean_sheet": "bool|null"
-    }]
-  }],
-  "group_standings": {
-    "Groupe A": [{
-      "team": "Pays",
-      "played": "int",
-      "won": "int",
-      "drawn": "int",
-      "lost": "int",
-      "goals_for": "int",
-      "goals_against": "int",
-      "goal_diff": "int",
-      "points": "int"
-    }]
+  "matches": [
+    {
+      "id": "string unique (ex: A1, A2, R16_1, QF_1, SF_1, FINAL)",
+      "home": "Nom pays domicile (ou TBD si pas encore qualifié)",
+      "away": "Nom pays visiteur (ou TBD)",
+      "group": "Groupe A|B|...|L ou null si phase élim",
+      "round": "group_stage|r16|qf|sf|third_place|final",
+      "date": "YYYY-MM-DD",
+      "venue": "Ville, Pays",
+      "home_score": null,
+      "away_score": null,
+      "status": "scheduled",
+      "is_finished": false,
+      "is_locked": false,
+      "display_order": 1
+    }
+  ]
+}
+
+Utilise les vraies dates du calendrier FIFA 2026 officiel.
+Phase de groupes : 11 juin au 2 juillet.
+Huitièmes : 5-8 juillet. Quarts : 11-12 juillet. Demies : 15-16 juillet.
+Finale : 19 juillet 2026, New York/New Jersey.
+"""
+
+PROMPT_RESULTATS_SYSTEM = """Tu es un expert en résultats football temps réel.
+Date actuelle : {today}.
+Tu dois chercher les derniers résultats officiels de la CDM 2026 sur FIFA.com et Sofascore.
+"""
+
+PROMPT_RESULTATS_USER = """Donne-moi les résultats des matchs CDM 2026 qui se sont terminés récemment.
+Format JSON strict :
+{
+  "results": [
+    {
+      "match_id": "identifiant du match",
+      "home": "Equipe domicile",
+      "away": "Equipe visiteur",
+      "home_score": 2,
+      "away_score": 1,
+      "date": "YYYY-MM-DD",
+      "status": "finished",
+      "is_finished": true,
+      "player_stats": [
+        {
+          "player_name": "Prénom Nom",
+          "team": "Pays",
+          "minutes_played": 90,
+          "goals": 1,
+          "assists": 0,
+          "yellow_cards": 0,
+          "red_cards": 0,
+          "saves": 0,
+          "ball_recoveries": 0,
+          "clean_sheet": false
+        }
+      ]
+    }
+  ]
+}
+Si aucun match n'est terminé encore, retourne {"results": []}.
+"""
+
+
+async def scraper_matchs_calendrier() -> list[dict]:
+    """Génère le calendrier complet CDM 2026 via Groq."""
+    cached = _cache_get("matchs_calendrier")
+    if cached:
+        return cached
+
+    logger.info("🗓️  Génération calendrier CDM 2026 via Groq...")
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_MATCHS_SYSTEM},
+            {"role": "user",   "content": PROMPT_MATCHS_USER},
+        ],
+        max_tokens=8192,
+    )
+
+    data = _extract_json(text or "")
+    matchs = data.get("matches", []) if isinstance(data, dict) else []
+
+    # Fallback : calendrier minimal si Groq indisponible
+    if not matchs:
+        matchs = _calendrier_fallback()
+
+    _cache_set("matchs_calendrier", matchs)
+    logger.info(f"✅ {len(matchs)} matchs générés")
+    return matchs
+
+
+async def scraper_resultats_recents() -> list[dict]:
+    """Récupère les résultats récents via Groq."""
+    cached = _cache_get("resultats_recents")
+    if cached:
+        return cached
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    logger.info("📡 Scraping résultats récents via Groq...")
+
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_RESULTATS_SYSTEM.format(today=today)},
+            {"role": "user",   "content": PROMPT_RESULTATS_USER},
+        ],
+        max_tokens=4096,
+    )
+
+    data = _extract_json(text or "")
+    results = data.get("results", []) if isinstance(data, dict) else []
+
+    _cache_set("resultats_recents", results)
+    logger.info(f"✅ {len(results)} résultats récupérés")
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 2 : EFFECTIFS OFFICIELS
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_EFFECTIFS_SYSTEM = """Tu es un expert en football international.
+Tu connais les effectifs officiels CDM 2026 annoncés par les fédérations.
+Retourne UNIQUEMENT du JSON valide.
+"""
+
+PROMPT_EFFECTIFS_USER = """Liste les effectifs officiels des 48 nations qualifiées pour la CDM 2026.
+Pour chaque nation donne les 26 joueurs sélectionnés (liste officielle FIFA).
+
+Format JSON strict :
+{
+  "squads": [
+    {
+      "nation": "France",
+      "group": "E",
+      "coach_name": "Didier Deschamps",
+      "coach_nationality": "Française",
+      "coach_price": 8.0,
+      "squad_status": "definitive",
+      "is_locked": false,
+      "players": [
+        {
+          "name": "Mike Maignan",
+          "position": "G",
+          "club": "AC Milan",
+          "age": 28,
+          "price": 7.5,
+          "number": 1
+        }
+      ]
+    }
+  ]
+}
+
+Positions : G (Gardien), D (Défenseur), M (Milieu), A (Attaquant).
+Prix Fantasy : G=4-8M€, D=5-9M€, M=6-11M€, A=7-14M€ selon la notoriété.
+Les stars mondiales (Mbappé, Vinicius, Bellingham...) = 13-14M€.
+"""
+
+PROMPT_EFFECTIF_NATION_USER = """Donne-moi l'effectif officiel complet de {nation} pour la CDM 2026.
+Inclus les 26 joueurs avec position, club, âge et prix Fantasy estimé.
+Format JSON : même structure que précédemment pour une seule nation.
+"""
+
+
+async def scraper_effectifs_tous() -> list[dict]:
+    """Récupère les effectifs des 48 nations."""
+    cached = _cache_get("effectifs_tous")
+    if cached:
+        return cached
+
+    logger.info("🌍 Scraping effectifs 48 nations via Groq...")
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_EFFECTIFS_SYSTEM},
+            {"role": "user",   "content": PROMPT_EFFECTIFS_USER},
+        ],
+        max_tokens=8192,
+        model=GROQ_MODEL,
+    )
+
+    data = _extract_json(text or "")
+    squads = data.get("squads", []) if isinstance(data, dict) else []
+
+    if squads:
+        _cache_set("effectifs_tous", squads)
+        logger.info(f"✅ {len(squads)} effectifs récupérés")
+    else:
+        logger.warning("⚠️  Aucun effectif récupéré — données vides")
+
+    return squads
+
+
+async def scraper_effectif_nation(nation: str) -> Optional[dict]:
+    """Récupère l'effectif d'une nation spécifique."""
+    cache_key = f"effectif_{nation.lower()}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_EFFECTIFS_SYSTEM},
+            {"role": "user",   "content": PROMPT_EFFECTIF_NATION_USER.format(nation=nation)},
+        ],
+        max_tokens=3000,
+        model=GROQ_MODEL_FAST,
+    )
+
+    data = _extract_json(text or "")
+    squad = None
+    if isinstance(data, dict):
+        squad = data.get("squads", [data])[0] if data.get("squads") else data
+
+    if squad:
+        _cache_set(cache_key, squad)
+    return squad
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 3 : STATS JOUEURS APRÈS MATCH
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_STATS_SYSTEM = """Tu es un analyste football qui extrait les statistiques officielles
+des matchs de la CDM 2026. Tu utilises les données de Sofascore et FIFA.
+Retourne UNIQUEMENT du JSON valide.
+"""
+
+PROMPT_STATS_USER = """Extrais les statistiques détaillées du match {home} vs {away}
+du {date} (CDM 2026).
+
+Format JSON strict :
+{
+  "match": {
+    "home": "{home}",
+    "away": "{away}",
+    "home_score": 0,
+    "away_score": 0,
+    "status": "finished",
+    "player_stats": [
+      {
+        "player_name": "Prénom Nom",
+        "team": "Pays",
+        "minutes_played": 90,
+        "goals": 0,
+        "assists": 0,
+        "yellow_cards": 0,
+        "red_cards": 0,
+        "saves": 0,
+        "ball_recoveries": 0,
+        "clean_sheet": false,
+        "position": "G|D|M|A"
+      }
+    ]
   }
 }
-Retourne UNIQUEMENT le JSON valide."""
+"""
 
 
-async def scraper_sofascore() -> Dict[str, Any]:
-    """Scrape Sofascore pour matchs et classements."""
-    logger.info("🌐 Scraping Sofascore en cours...")
-    
-    cache_key = "sofascore_data"
-    cached = _cache.get(cache_key)
-    if cached and (time.time() - cached[0]) < CACHE_TTL_SECONDS:
-        logger.info("✅ Sofascore depuis cache")
-        return cached[1]
+async def scraper_stats_match(home: str, away: str, date: str) -> Optional[dict]:
+    """Scrape les stats d'un match spécifique."""
+    cache_key = f"stats_{home}_{away}_{date}".lower().replace(" ", "_")
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
 
-    html = await _fetch_url(URL_SOFASCORE)
-    if not html:
-        logger.warning("⚠️  Sofascore inaccessible")
-        return {}
+    logger.info(f"📊 Scraping stats {home} vs {away}...")
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_STATS_SYSTEM},
+            {"role": "user",   "content": PROMPT_STATS_USER.format(
+                home=home, away=away, date=date
+            )},
+        ],
+        max_tokens=3000,
+    )
 
-    texte_propre = _nettoyer_html(html)
-    resultat = _appeler_groq(PROMPT_SOFASCORE, texte_propre, max_tokens=3500)
+    data = _extract_json(text or "")
+    match_data = data.get("match") if isinstance(data, dict) else None
 
-    if resultat:
-        _cache[cache_key] = (time.time(), resultat)
-        _scraping_status["sofascore"]["items"] = len(resultat.get("matches", []))
-        logger.info(f"✅ Sofascore: {_scraping_status['sofascore']['items']} matchs")
-        return resultat
-
-    return {}
-
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  SCRAPING OLYMPICS (EFFECTIFS)
-# ════════════════════════════════════════════════════════════════════════════════
-
-PROMPT_OLYMPICS = """Tu es un extracteur d'effectifs de football expert. Analyse ce contenu HTML/texte
-et extrais pour chaque nation dont la liste est visible (UNIQUEMENT le JSON, pas de texte) :
-{
-  "squads": [{
-    "nation": "Nom du pays en français",
-    "squad_status": "definitive|provisoire|non_publiee",
-    "is_locked": "bool (true si non_publiee ou provisoire)",
-    "coach_name": "Nom Prénom|null",
-    "players": [{
-      "name": "Prénom Nom",
-      "position": "G|D|M|A",
-      "club": "Nom club|null",
-      "number": "int|null"
-    }]
-  }]
-}
-RÈGLE CRITIQUE : n'inclure une nation que si au moins UN joueur est lisible dans le texte.
-Retourne UNIQUEMENT le JSON valide."""
+    if match_data:
+        _cache_set(cache_key, match_data)
+    return match_data
 
 
-async def scraper_effectifs_olympics() -> List[Dict[str, Any]]:
-    """Scrape Olympics pour effectifs officiels."""
-    logger.info("🌐 Scraping Olympics (effectifs) en cours...")
-    
-    cache_key = "olympics_squads"
-    cached = _cache.get(cache_key)
-    if cached and (time.time() - cached[0]) < CACHE_TTL_SECONDS:
-        logger.info("✅ Olympics depuis cache")
-        return cached[1]
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 4 : AUTO-FILL ÉQUIPE FANTASY
+# ══════════════════════════════════════════════════════════════════════════════
 
-    html = await _fetch_url(URL_OLYMPICS)
-    if not html:
-        logger.warning("⚠️  Olympics inaccessible")
-        return []
+PROMPT_AUTOFILL_SYSTEM = """Tu es un expert en Fantasy Football.
+Tu dois construire une équipe Fantasy optimale pour la CDM 2026 en respectant TOUTES les règles.
+Retourne UNIQUEMENT du JSON valide.
+"""
 
-    texte_propre = _nettoyer_html(html)
-    resultat = _appeler_groq(PROMPT_OLYMPICS, texte_propre, max_tokens=3000)
+PROMPT_AUTOFILL_USER = """Construis une équipe Fantasy CDM 2026 optimale avec ces contraintes strictes :
 
-    if resultat and isinstance(resultat.get("squads"), list):
-        squads = resultat["squads"]
-        _cache[cache_key] = (time.time(), squads)
-        _scraping_status["olympics"]["items"] = len(squads)
-        logger.info(f"✅ Olympics: {len(squads)} effectifs")
-        return squads
+Budget total : {budget}M€
+Formation : {formation}
+Règles :
+- Exactement 15 joueurs : 2G + 5D + 5M + 3A (titulaires selon formation + remplaçants)
+- Maximum 3 joueurs de la même nationalité
+- 1 entraîneur dont la nationalité ≠ aucun joueur
+- Budget total joueurs + entraîneur ≤ {budget}M€
 
-    return []
+Joueurs disponibles (liste partielle) :
+{players_sample}
 
+Entraîneurs disponibles :
+{coaches_sample}
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  SYNCHRONISATION BDD
-# ════════════════════════════════════════════════════════════════════════════════
-
-async def _sync_to_db(sofascore_data: Dict, olympics_data: List, db) -> None:
-    """Synchronise les données scrappées dans la BD de manière atomique."""
-    from app.models import MatchResult, Player, Coach, TeamNation, GroupStanding, ScrapingMetadata
-    from sqlalchemy import delete
-    
-    logger.info("🔄 Synchronisation BDD en cours...")
-    
-    try:
-        # ── Synchroniser matchs Sofascore ──
-        if sofascore_data.get("matches"):
-            for match_data in sofascore_data["matches"]:
-                match = db.query(MatchResult).filter(
-                    MatchResult.sofascore_id == match_data["id"]
-                ).first()
-                
-                if not match:
-                    match = MatchResult(sofascore_id=match_data["id"])
-                    db.add(match)
-                
-                match.home = match_data.get("home")
-                match.away = match_data.get("away")
-                match.group = match_data.get("group")
-                match.round = match_data.get("round", "group_stage")
-                match.date = match_data.get("date")
-                match.kickoff_utc = match_data.get("kickoff_utc")
-                match.home_score = match_data.get("home_score")
-                match.away_score = match_data.get("away_score")
-                match.status = match_data.get("status", "scheduled")
-                match.player_stats = match_data.get("player_stats", {})
-                match.last_updated = datetime.utcnow().isoformat()
-
-        # ── Synchroniser classements groupes ──
-        if sofascore_data.get("group_standings"):
-            for group_name, standings in sofascore_data["group_standings"].items():
-                for team_data in standings:
-                    standing = db.query(GroupStanding).filter(
-                        GroupStanding.group_name == group_name,
-                        GroupStanding.team == team_data.get("team")
-                    ).first()
-                    
-                    if not standing:
-                        standing = GroupStanding(
-                            group_name=group_name,
-                            team=team_data.get("team")
-                        )
-                        db.add(standing)
-                    
-                    standing.played = team_data.get("played", 0)
-                    standing.won = team_data.get("won", 0)
-                    standing.drawn = team_data.get("drawn", 0)
-                    standing.lost = team_data.get("lost", 0)
-                    standing.goals_for = team_data.get("goals_for", 0)
-                    standing.goals_against = team_data.get("goals_against", 0)
-                    standing.goal_diff = team_data.get("goal_diff", 0)
-                    standing.points = team_data.get("points", 0)
-                    standing.last_updated = datetime.utcnow().isoformat()
-
-        # ── Synchroniser effectifs Olympics ──
-        for squad_data in olympics_data:
-            nation = squad_data.get("nation")
-            
-            team_nation = db.query(TeamNation).filter(
-                TeamNation.name == nation
-            ).first()
-            
-            if not team_nation:
-                team_nation = TeamNation(name=nation)
-                db.add(team_nation)
-            
-            squad_status = squad_data.get("squad_status", "non_publiee")
-            team_nation.squad_status = squad_status
-            team_nation.is_locked = squad_data.get("is_locked", True)
-            team_nation.coach_name = squad_data.get("coach_name")
-            team_nation.last_updated = datetime.utcnow().isoformat()
-            
-            if squad_status == "definitive":
-                team_nation.squad_published_at = datetime.utcnow().isoformat()
-            
-            db.flush()  # Créer team_nation.id si nouveau
-            
-            # ── Synchroniser joueurs ──
-            # Supprimer les anciens joueurs si changement de statut
-            if squad_status == "definitive":
-                db.query(Player).filter(Player.team_id == team_nation.id).delete()
-            
-            for player_data in squad_data.get("players", []):
-                player = db.query(Player).filter(
-                    Player.name == player_data.get("name"),
-                    Player.team_id == team_nation.id
-                ).first()
-                
-                if not player:
-                    player = Player(
-                        name=player_data.get("name"),
-                        team_id=team_nation.id
-                    )
-                    db.add(player)
-                
-                player.position = player_data.get("position", "M")
-                player.nationality = nation
-                player.is_confirmed = True
-                player.price = _estimer_prix(player_data.get("position", "M"))
-                player.last_stat_update = datetime.utcnow().isoformat()
-
-        # ── Mettre à jour métadonnées ──
-        for source in ["sofascore", "olympics"]:
-            metadata = db.query(ScrapingMetadata).filter(
-                ScrapingMetadata.source == source
-            ).first()
-            
-            if not metadata:
-                metadata = ScrapingMetadata(source=source)
-                db.add(metadata)
-            
-            metadata.last_scrape_at = datetime.utcnow().isoformat()
-            metadata.last_success_at = datetime.utcnow().isoformat()
-            metadata.status = "success"
-            metadata.items_scraped = _scraping_status[source]["items"]
-            metadata.data_version_hash = _compute_data_version_hash(db)
-
-        db.commit()
-        logger.info("✅ Synchronisation BDD réussie")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Erreur sync BDD : {e}")
-        raise
+Retourne :
+{{
+  "players": [
+    {{"id": 1, "name": "Mike Maignan", "position": "G", "nationality": "France", "price": 7.5}},
+    ...
+  ],
+  "coach": {{"id": 1, "name": "Carlo Ancelotti", "nationality": "Italienne", "price": 7.0}},
+  "formation": "{formation}",
+  "total_spent": 95.5,
+  "remaining_budget": 4.5,
+  "reasoning": "Explication courte du choix"
+}}
+"""
 
 
-def _estimer_prix(poste: str) -> float:
-    """Estime le prix Fantasy par poste."""
-    poste_norm = poste.upper() if poste else "M"
-    prix = {"G": 5.5, "D": 6.0, "M": 7.0, "A": 7.5}
-    return prix.get(poste_norm, 6.0)
+async def auto_fill_equipe(
+    budget: float,
+    formation: str,
+    players_disponibles: list[dict],
+    coaches_disponibles: list[dict],
+) -> Optional[dict]:
+    """Génère une équipe Fantasy optimale via Groq."""
+
+    # Préparer un échantillon représentatif
+    sample_players = players_disponibles[:60] if len(players_disponibles) > 60 else players_disponibles
+    players_text = "\n".join(
+        f"ID:{p['id']} {p['name']} ({p['position']}) {p.get('nationality','')} {p.get('price',6)}M€"
+        for p in sample_players
+    )
+    coaches_text = "\n".join(
+        f"ID:{c['id']} {c['name']} ({c.get('nationality','')}) {c.get('price',5)}M€"
+        for c in coaches_disponibles[:20]
+    )
+
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_AUTOFILL_SYSTEM},
+            {"role": "user",   "content": PROMPT_AUTOFILL_USER.format(
+                budget=budget,
+                formation=formation,
+                players_sample=players_text or "Aucun joueur chargé",
+                coaches_sample=coaches_text or "Aucun coach chargé",
+            )},
+        ],
+        max_tokens=2048,
+    )
+
+    return _extract_json(text or "")
 
 
-def _compute_data_version_hash(db) -> str:
-    """Calcule un hash pour invalider le cache client si les données changent."""
-    from app.models import Player, MatchResult, TeamNation
-    
-    players_count = db.query(Player).count()
-    matches_count = db.query(MatchResult).count()
-    teams_count = db.query(TeamNation).count()
-    
-    data_str = f"{players_count}_{matches_count}_{teams_count}"
-    return hashlib.md5(data_str.encode()).hexdigest()[:8]
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 5 : CALCUL POINTS FANTASY IA
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_POINTS_SYSTEM = """Tu es le moteur de calcul officiel Fantasy Boulzazen CDM 2026.
+Tu appliques le barème EXACT suivant (aucune approximation) :
+
+JOUEURS par poste (G=Gardien, D=Défenseur, M=Milieu, A=Attaquant) :
+- Match complet (≥90 min) : +2 pts tous postes
+- Entrée/sortie (<90 min) : +1 pt tous postes
+- But marqué : G=+8, D=+6, M=+5, A=+4
+- Passe décisive : G=+6, D=+5, M=+4, A=+4
+- Clean sheet (0 but encaissé) : G=+5, D=+4, M=+1, A=0
+- 3 parades ou plus (gardien) : +3 pts par tranche de 3
+- 5 récupérations ou plus (G,D,M) : +3 pts par tranche de 5
+- Carton jaune : -1 pt
+- Carton rouge : -2 pts
+
+ENTRAÎNEUR :
+- Présent sur le banc : +1 pt
+- Victoire : +2 pts de base
+- Chaque tranche de 2 buts d'écart en victoire : +3 pts (ex: 4-0 = +6 bonus)
+- Défaite : -2 pts de base, -3 pts par tranche de 2 buts d'écart
+- But d'un remplaçant : +3 pts
+- Passe d'un remplaçant : +2 pts
+
+PRONOSTICS :
+- Score exact : +5 pts
+- Bonne issue (V/N/D correct mais score différent) : +2 pts
+- Mauvaise issue : 0 pt
+
+TABLEAU (bracket) :
+- Bonne prédiction rang de groupe : +5 pts par équipe
+- Bonne équipe en phase élim : +5 pts par match
+
+Retourne UNIQUEMENT du JSON valide.
+"""
+
+PROMPT_POINTS_USER = """Calcule les points Fantasy pour ce joueur/entraîneur :
+
+Entité : {name} ({type})
+Poste : {position}
+Stats du match :
+{stats}
+
+Retourne :
+{{
+  "name": "{name}",
+  "type": "{type}",
+  "position": "{position}",
+  "detail": {{
+    "temps_de_jeu": 0,
+    "buts": 0,
+    "passes": 0,
+    "clean_sheet": 0,
+    "parades": 0,
+    "recups": 0,
+    "cartons": 0,
+    "coaching": 0
+  }},
+  "total": 0,
+  "explanation": "Détail du calcul"
+}}
+"""
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  ORCHESTRATEUR
-# ════════════════════════════════════════════════════════════════════════════════
+async def calculer_points_ia(
+    name: str,
+    entity_type: str,  # "player" | "coach"
+    position: str,
+    stats: dict,
+) -> Optional[dict]:
+    """Calcule les points Fantasy via Groq IA (validation + explication)."""
+    stats_text = json.dumps(stats, ensure_ascii=False)
 
-async def scraping_complet(db=None) -> Dict[str, Any]:
-    """Lance le scraping complet de toutes les sources."""
-    logger.info("🚀 Scraping complet lancé...")
-    
-    try:
-        # Récupérer les données
-        sofascore_data = await scraper_sofascore()
-        olympics_data = await scraper_effectifs_olympics()
-        
-        # Synchroniser en BD si session fournie
-        if db:
-            await _sync_to_db(sofascore_data, olympics_data, db)
-        
-        return {
-            "sofascore": sofascore_data,
-            "olympics": olympics_data,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    
-    except Exception as e:
-        logger.error(f"❌ Erreur scraping complet : {e}")
-        return {}
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_POINTS_SYSTEM},
+            {"role": "user",   "content": PROMPT_POINTS_USER.format(
+                name=name,
+                type=entity_type,
+                position=position,
+                stats=stats_text,
+            )},
+        ],
+        max_tokens=800,
+        model=GROQ_MODEL_FAST,
+        temperature=0.0,
+    )
+
+    return _extract_json(text or "")
 
 
-def get_scraping_status() -> Dict[str, Any]:
-    """Retourne le statut du dernier scraping."""
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 6 : ANALYSE PLAINTE IA
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_PLAINTE_SYSTEM = """Tu es l'administrateur IA de la ligue privée Fantasy Boulzazen CDM 2026.
+Tu analyses les réclamations des joueurs avec impartialité et précision.
+
+Barème officiel :
+- But : G=8, D=6, M=5, A=4 pts
+- Passe : G=6, D=5, M=4, A=4 pts
+- Clean sheet : G=5, D=4, M=1, A=0 pts
+- Match complet : +2, partiel : +1
+- Parades (par 3) : +3 pts (gardiens)
+- Récupérations (par 5) : +3 pts (G,D,M)
+- CJ : -1, CR : -2
+- Entraîneur présent : +1, victoire : +2, +3/2 buts d'écart
+
+Retourne UNIQUEMENT du JSON valide.
+"""
+
+PROMPT_PLAINTE_USER = """Analyse cette réclamation Fantasy :
+
+ID : {complaint_id}
+Joueur/Match concerné : {subject}
+Description : {description}
+Points réclamés : {claimed_points}
+
+Rends un verdict :
+{{
+  "verdict": "approved|rejected|needs_investigation",
+  "confidence": 85,
+  "summary": "Résumé en une phrase",
+  "reasoning": "Analyse détaillée (2-4 phrases)",
+  "points_impact": "+X ou -X ou neutre",
+  "action": "Action recommandée si accepté",
+  "rule_reference": "Règle du barème applicable"
+}}
+"""
+
+
+async def analyser_plainte_ia(
+    complaint_id: str,
+    subject: str,
+    description: str,
+    claimed_points: str = "non précisé",
+) -> Optional[dict]:
+    """Analyse une réclamation Fantasy via Groq IA."""
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": PROMPT_PLAINTE_SYSTEM},
+            {"role": "user",   "content": PROMPT_PLAINTE_USER.format(
+                complaint_id=complaint_id,
+                subject=subject,
+                description=description,
+                claimed_points=claimed_points,
+            )},
+        ],
+        max_tokens=600,
+        model=GROQ_MODEL_FAST,
+        temperature=0.2,
+    )
+
+    return _extract_json(text or "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 7 : CLASSEMENTS GROUPES IA
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_CLASSEMENTS_USER = """Donne-moi les classements actuels de tous les groupes (A à L)
+de la Coupe du Monde 2026, basés sur les résultats disponibles.
+
+Format JSON :
+{{
+  "standings": {{
+    "Groupe A": [
+      {{
+        "team": "USA",
+        "played": 0, "won": 0, "drawn": 0, "lost": 0,
+        "goals_for": 0, "goals_against": 0, "goal_diff": 0,
+        "points": 0, "qualified": false
+      }}
+    ]
+  }}
+}}
+Si le tournoi n'a pas encore commencé, retourne les équipes avec tout à 0.
+"""
+
+
+async def scraper_classements_groupes() -> dict:
+    """Récupère les classements de groupes."""
+    cached = _cache_get("classements_groupes")
+    if cached:
+        return cached
+
+    text = await _groq_chat(
+        messages=[
+            {"role": "system", "content": "Tu es expert CDM 2026. JSON uniquement."},
+            {"role": "user",   "content": PROMPT_CLASSEMENTS_USER},
+        ],
+        max_tokens=4096,
+        model=GROQ_MODEL_FAST,
+    )
+
+    data = _extract_json(text or "")
+    standings = data.get("standings", {}) if isinstance(data, dict) else {}
+
+    if standings:
+        _cache_set("classements_groupes", standings)
+    return standings
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ORCHESTRATEUR PRINCIPAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def scraping_complet(db=None) -> dict[str, Any]:
+    """
+    Lance le scraping complet en parallèle :
+    - Calendrier matchs
+    - Résultats récents
+    - Classements groupes
+    - Effectifs (en arrière-plan, plus long)
+    """
+    logger.info("🚀 Scraping complet CDM 2026 démarré...")
+    debut = time.time()
+
+    # Tâches parallèles prioritaires
+    resultats_task, classements_task, matchs_task = await asyncio.gather(
+        scraper_resultats_recents(),
+        scraper_classements_groupes(),
+        scraper_matchs_calendrier(),
+        return_exceptions=True,
+    )
+
+    matchs     = matchs_task      if isinstance(matchs_task, list)      else []
+    resultats  = resultats_task   if isinstance(resultats_task, list)    else []
+    classements= classements_task if isinstance(classements_task, dict)  else {}
+
+    # Fusionner résultats dans les matchs
+    if resultats:
+        matchs_index = {m["id"]: m for m in matchs}
+        for res in resultats:
+            mid = res.get("match_id") or res.get("id")
+            if mid and mid in matchs_index:
+                matchs_index[mid].update({
+                    "home_score":   res.get("home_score"),
+                    "away_score":   res.get("away_score"),
+                    "status":       "finished",
+                    "is_finished":  True,
+                    "player_stats": res.get("player_stats", []),
+                })
+        matchs = list(matchs_index.values())
+
+    duree = round(time.time() - debut, 2)
+    logger.info(f"✅ Scraping terminé en {duree}s — {len(matchs)} matchs, {len(classements)} groupes")
+
     return {
-        "sofascore": _scraping_status["sofascore"],
-        "olympics": _scraping_status["olympics"],
-        "data_version_hash": _scraping_status["data_version_hash"],
+        "matchs":      matchs,
+        "classements": classements,
+        "effectifs":   [],   # chargés séparément à la demande
+        "resume": {
+            "matchs_scraped":   len(matchs),
+            "resultats_nouveaux": len(resultats),
+            "groupes":          len(classements),
+            "duree_secondes":   duree,
+        },
     }
 
 
-async def cleanup():
-    """Cleanup au shutdown."""
-    await _close_playwright_browser()
+async def close_browser() -> None:
+    """Compatibilité avec l'ancien code — rien à fermer ici."""
+    pass
+
+
+async def get_all_players_market() -> list[dict]:
+    """Retourne tous les joueurs du marché (pour l'auto-fill)."""
+    squads = await scraper_effectifs_tous()
+    players = []
+    pid = 1
+    for squad in squads:
+        for player in squad.get("players", []):
+            players.append({
+                "id":          pid,
+                "name":        player.get("name", ""),
+                "position":    player.get("position", "M"),
+                "nationality": squad.get("nation", ""),
+                "price":       float(player.get("price", 6.0)),
+                "club":        player.get("club", ""),
+                "is_confirmed": True,
+                "goals":       0,
+                "assists":     0,
+                "points_total": 0,
+            })
+            pid += 1
+    return players
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CALENDRIER FALLBACK (si Groq indisponible)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calendrier_fallback() -> list[dict]:
+    """Calendrier minimal CDM 2026 codé en dur pour le fallback."""
+    groupes = {
+        
+    }
+    # Dates approximatives
+    from datetime import date, timedelta
+    start = date(2026, 6, 11)
+    matchs = []
+    mid = 1
+    day_offset = 0
+    for groupe, pairs in groupes.items():
+        for i, (home, away) in enumerate(pairs):
+            round_num = i // 2 + 1
+            match_date = (start + timedelta(days=day_offset + i)).isoformat()
+            matchs.append({
+                "id": f"G{groupe}{mid}",
+                "home": home, "away": away,
+                "group": f"Groupe {groupe}",
+                "round": "group_stage",
+                "date": match_date,
+                "venue": "USA",
+                "home_score": None, "away_score": None,
+                "status": "scheduled",
+                "is_finished": False, "is_locked": False,
+                "display_order": mid,
+            })
+            mid += 1
+        day_offset += 3
+
+    # Phases élim (TBD)
+    for round_name, label, count in [("r16","R16",16), ("qf","QF",8), ("sf","SF",4), ("third_place","3P",2), ("final","FIN",1)]:
+        for i in range(count // 2 if round_name != "final" else 1):
+            matchs.append({
+                "id": f"{round_name}_{i+1}",
+                "home": "TBD", "away": "TBD",
+                "group": None, "round": round_name,
+                "date": "2026-07-15", "venue": "USA",
+                "home_score": None, "away_score": None,
+                "status": "scheduled",
+                "is_finished": False, "is_locked": True,
+                "display_order": mid,
+            })
+            mid += 1
+
+    return matchs

@@ -5,20 +5,13 @@ import { useApp } from '../App';
 const nationKey = (value = '') => {
   const raw = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
   const aliases = {
-    francaise: 'france',
-    francais: 'france',
-    bresilienne: 'bresil',
-    bresilien: 'bresil',
-    anglaise: 'angleterre',
-    anglais: 'angleterre',
-    espagnole: 'espagne',
-    espagnol: 'espagne',
-    algerienne: 'algerie',
-    algerien: 'algerie',
-    marocaine: 'maroc',
-    marocain: 'maroc',
-    senegalaise: 'senegal',
-    senegalais: 'senegal',
+    francaise: 'france', francais: 'france',
+    bresilienne: 'bresil', bresilien: 'bresil',
+    anglaise: 'angleterre', anglais: 'angleterre',
+    espagnole: 'espagne', espagnol: 'espagne',
+    algerienne: 'algerie', algerien: 'algerie',
+    marocaine: 'maroc', marocain: 'maroc',
+    senegalaise: 'senegal', senegalais: 'senegal',
   };
   return aliases[raw] || raw;
 };
@@ -28,6 +21,7 @@ export default function MyTeam() {
   const [players, setPlayers] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState(null);
   const [error, setError] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null);
 
@@ -38,23 +32,36 @@ export default function MyTeam() {
 
   const [search, setSearch] = useState('');
   const [selectedPosition, setSelectedPosition] = useState('ALL');
-  const [marketType, setMarketType] = useState('players'); 
+  const [marketType, setMarketType] = useState('players');
 
   useEffect(() => {
     const loadMarketData = async () => {
       try {
         const [resPlayers, resCoaches] = await Promise.all([
           fetch(`${API_BASE}/api/players`),
-          fetch(`${API_BASE}/api/coaches`)
+          fetch(`${API_BASE}/api/coaches`),
         ]);
-
-        if (!resPlayers.ok || !resCoaches.ok) throw new Error("Échec du chargement du mercato.");
 
         const dataPlayers = await resPlayers.json();
         const dataCoaches = await resCoaches.json();
 
-        setPlayers(Array.isArray(dataPlayers) ? dataPlayers : []);
-        setCoaches(Array.isArray(dataCoaches) ? dataCoaches : []);
+        // Les routes retournent soit un tableau soit {data:[], message:"..."}
+        const playersList = Array.isArray(dataPlayers)
+          ? dataPlayers
+          : (dataPlayers.data || []);
+        const coachesList = Array.isArray(dataCoaches)
+          ? dataCoaches
+          : (dataCoaches.data || []);
+
+        // Message de chargement si données vides
+        const loadingMsg = (!Array.isArray(dataPlayers) && dataPlayers.message)
+          || (!Array.isArray(dataCoaches) && dataCoaches.message)
+          || null;
+
+        setPlayers(playersList);
+        setCoaches(coachesList);
+        if (loadingMsg) setLoadingMessage(loadingMsg);
+
       } catch (err) {
         console.error(err);
         setError(err.message);
@@ -126,17 +133,13 @@ export default function MyTeam() {
     };
 
     Object.entries(required).forEach(([pos, qty]) => {
-      for (const player of players
-        .filter(p => p.position === pos)
-        .sort((a, b) => a.price - b.price)) {
+      for (const player of players.filter(p => p.position === pos).sort((a, b) => a.price - b.price)) {
         if (picked.filter(p => p.position === pos).length >= qty) break;
         addPlayer(player);
       }
     });
 
-    for (const player of players
-      .filter(p => !picked.some(x => x.id === p.id))
-      .sort((a, b) => a.price - b.price)) {
+    for (const player of players.filter(p => !picked.some(x => x.id === p.id)).sort((a, b) => a.price - b.price)) {
       if (picked.length >= 15) break;
       addPlayer(player);
     }
@@ -225,7 +228,7 @@ export default function MyTeam() {
   };
 
   const filteredPlayers = players.filter(player => {
-    const matchesSearch = player.name.toLowerCase().includes(search.toLowerCase()) || 
+    const matchesSearch = player.name.toLowerCase().includes(search.toLowerCase()) ||
                           player.nationality.toLowerCase().includes(search.toLowerCase());
     const matchesPosition = selectedPosition === 'ALL' || player.position === selectedPosition;
     return matchesSearch && matchesPosition;
@@ -235,8 +238,15 @@ export default function MyTeam() {
 
   return (
     <div className="view fantasy-view">
-      
-      {/* HEADER : COMPTEURS & CONTROLES */}
+
+      {/* BANNER Groq en cours de chargement */}
+      {loadingMessage && (
+        <div className="sync-info-banner" style={{ margin: '8px 12px 0' }}>
+          🔄 {loadingMessage}
+        </div>
+      )}
+
+      {/* HEADER */}
       <div className="view-header-card">
         <div>
           <h2>Gestion de l'Équipe Fantasy</h2>
@@ -259,13 +269,11 @@ export default function MyTeam() {
       </div>
       {saveStatus && <div className={`pred-status ${saveStatus.type}`}>{saveStatus.text}</div>}
 
-      {/* DISPOSITION MAIN GRILLE */}
       <div className="fantasy-main-layout">
-        
+
         {/* TERRAIN */}
         <div className="pitch-section">
           <div className="real-pitch">
-            
             <div className="goal-area top"></div>
             <div className="penalty-area top"></div>
             <div className="penalty-spot top"></div>
@@ -318,6 +326,14 @@ export default function MyTeam() {
                   </div>
                 </div>
 
+                {players.length === 0 && loadingMessage && (
+                  <div className="empty-state" style={{ padding: '24px 16px' }}>
+                    <div className="empty-state-icon">⏳</div>
+                    <h4>Joueurs en chargement</h4>
+                    <p>Groq scrape les effectifs depuis Olympics. Réessayez dans 30–60 secondes.</p>
+                  </div>
+                )}
+
                 <div className="market-list">
                   {filteredPlayers.map(player => {
                     const isBought = roster.find(p => p.id === player.id);
@@ -344,27 +360,36 @@ export default function MyTeam() {
                 </div>
               </>
             ) : (
-              <div className="market-list">
-                {coaches.map(coach => {
-                  const isSelected = selectedCoach && selectedCoach.id === coach.id;
-                  const hasPlayerConflict = roster.map(p => nationKey(p.nationality)).includes(nationKey(coach.nationality));
-                  const isDisabled = hasPlayerConflict && !isSelected;
+              <>
+                {coaches.length === 0 && loadingMessage && (
+                  <div className="empty-state" style={{ padding: '24px 16px' }}>
+                    <div className="empty-state-icon">⏳</div>
+                    <h4>Entraîneurs en chargement</h4>
+                    <p>Groq scrape les entraîneurs depuis Olympics. Réessayez dans 30–60 secondes.</p>
+                  </div>
+                )}
+                <div className="market-list">
+                  {coaches.map(coach => {
+                    const isSelected = selectedCoach && selectedCoach.id === coach.id;
+                    const hasPlayerConflict = roster.map(p => nationKey(p.nationality)).includes(nationKey(coach.nationality));
+                    const isDisabled = hasPlayerConflict && !isSelected;
 
-                  return (
-                    <div key={coach.id} className={`market-item coach ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}`}
-                      onClick={() => !isDisabled && handleSelectCoach(coach)}>
-                      <div className="item-details">
-                        <span className="item-name">👔 {coach.name}</span>
-                        <span className="muted item-sub">Sélectionneur : {coach.nationality}</span>
-                        {hasPlayerConflict && !isSelected && <span className="danger tag">(Conflit Joueur)</span>}
+                    return (
+                      <div key={coach.id} className={`market-item coach ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}`}
+                        onClick={() => !isDisabled && handleSelectCoach(coach)}>
+                        <div className="item-details">
+                          <span className="item-name">👔 {coach.name}</span>
+                          <span className="muted item-sub">Sélectionneur : {coach.nationality}</span>
+                          {hasPlayerConflict && !isSelected && <span className="danger tag">(Conflit Joueur)</span>}
+                        </div>
+                        <div className="item-action">
+                          {isSelected ? 'Retirer' : `${coach.price} M€`}
+                        </div>
                       </div>
-                      <div className="item-action">
-                        {isSelected ? 'Retirer' : `${coach.price} M€`}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
         </div>

@@ -1,13 +1,7 @@
 /**
  * App.jsx — Application principale Fantasy Boulzazen WC 2026
- * ─────────────────────────────────────────────────────────────
- * Modifications v5 :
- *  - Intégration de l'utilitaire getDisplayName (username.js)
- *  - Cache local (localStorage) : user + leaderboard persistés
- *    → Chargement immédiat en mode dégradé si le backend est hors ligne
- *  - État de synchronisation visuel transmis via le Context global
- *    (syncStatus : 'idle' | 'syncing' | 'ok' | 'degraded' | 'offline')
- *  - Fallback gracieux : l'app reste utilisable même sans backend
+ * Phase 5 Frontend : comparaison data_version avec localStorage
+ * → invalide le cache leaderboard + recharge joueurs/matchs si changé
  */
 
 import { useState, useEffect, createContext, useContext } from 'react';
@@ -24,6 +18,7 @@ import AdminPanel   from './views/AdminPanel';
 // ─── Clés du cache localStorage ───────────────────────────────
 const CACHE_USER_KEY        = 'boulzazen_cache_user';
 const CACHE_LEADERBOARD_KEY = 'boulzazen_cache_leaderboard';
+const CACHE_DATA_VERSION    = 'boulzazen_data_version';   // Phase 5
 const GUEST_SESSION_KEY     = 'boulzazen_guest_session';
 const CACHE_TTL_MS          = 1000 * 60 * 30; // 30 minutes
 
@@ -48,31 +43,48 @@ const NAV_ITEMS = [
 //  CACHE HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-/** Sauvegarde une valeur dans le cache avec timestamp. */
 function cacheSet(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify({ ts: Date.now(), value }));
-  } catch (e) {
-    // Quota dépassé ou mode privé — on ignore silencieusement
-  }
+  } catch { /* silencieux */ }
 }
 
-/** Lit le cache. Retourne null si absent ou expiré. */
 function cacheGet(key, ttlMs = CACHE_TTL_MS) {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const { ts, value } = JSON.parse(raw);
-    if (Date.now() - ts > ttlMs) return null; // expiré
+    if (Date.now() - ts > ttlMs) return null;
     return value;
   } catch {
     return null;
   }
 }
 
-/** Supprime une entrée du cache. */
 function cacheDel(key) {
   try { localStorage.removeItem(key); } catch { /* silencieux */ }
+}
+
+// ─── Phase 5 : gestion data_version ───────────────────────────
+
+/**
+ * Retourne true si la data_version reçue du backend est différente
+ * de la dernière connue en localStorage → données changées.
+ */
+function isDataVersionChanged(newVersion) {
+  if (!newVersion) return false;
+  try {
+    const stored = localStorage.getItem(CACHE_DATA_VERSION);
+    return stored !== newVersion;
+  } catch {
+    return false;
+  }
+}
+
+function saveDataVersion(version) {
+  try {
+    if (version) localStorage.setItem(CACHE_DATA_VERSION, version);
+  } catch { /* silencieux */ }
 }
 
 function slugifyGuestName(value) {
@@ -344,12 +356,8 @@ function AuthScreen({ onSuccess, initialError }) {
   const handleGuestJoin = (e) => {
     e.preventDefault();
     setError(null);
-    setSuccess(null);
     const name = guestName.trim();
-    if (name.length < 2) {
-      setError('Entre un pseudo de 2 caracteres minimum.');
-      return;
-    }
+    if (name.length < 2) { setError('Entre un pseudo de 2 caractères minimum.'); return; }
     const guestSession = buildGuestSession(name);
     saveGuestSession(guestSession);
     onSuccess(guestSession);
@@ -487,16 +495,11 @@ function SyncScreen() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INDICATEUR DE SYNC (petit voyant en header)
+//  SYNC INDICATOR
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Affiche un indicateur visuel discret de l'état de synchronisation.
- * syncStatus : 'idle' | 'syncing' | 'ok' | 'degraded' | 'offline'
- */
 function SyncIndicator({ syncStatus }) {
   if (!syncStatus || syncStatus === 'idle') return null;
-
   const cfg = {
     syncing:  { cls: 'sync-pulse',    title: 'Synchronisation en cours...',  color: 'var(--accent)' },
     ok:       { cls: 'sync-ok',       title: 'Données à jour',               color: 'var(--green)'  },
@@ -515,7 +518,7 @@ function SyncIndicator({ syncStatus }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER FALLBACK USER
+//  FALLBACK USER
 // ═══════════════════════════════════════════════════════════════
 
 function buildFallbackUser(session) {
@@ -538,15 +541,17 @@ function buildFallbackUser(session) {
 // ═══════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [session,    setSession]    = useState(null);
-  const [user,       setUser]       = useState(null);
-  const [screen,     setScreen]     = useState('splash');
-  const [activeTab,  setActiveTab]  = useState('dashboard');
-  const [syncData,   setSyncData]   = useState(null);
-  const [syncStatus, setSyncStatus] = useState('idle');
-  const [hashError,  setHashError]  = useState(null);
+  const [session,       setSession]       = useState(null);
+  const [user,          setUser]          = useState(null);
+  const [screen,        setScreen]        = useState('splash');
+  const [activeTab,     setActiveTab]     = useState('dashboard');
+  const [syncData,      setSyncData]      = useState(null);
+  const [syncStatus,    setSyncStatus]    = useState('idle');
+  const [hashError,     setHashError]     = useState(null);
+  // Phase 5 : signal d'invalidation de cache vers les vues enfants
+  const [dataVersion,   setDataVersion]   = useState('');
+  const [cacheInvalidated, setCacheInvalidated] = useState(0);
 
-  // ── Hash error Supabase ─────────────────────────────────────
   useEffect(() => {
     const err = parseHashError();
     if (err) {
@@ -556,28 +561,15 @@ export default function App() {
     }
   }, []);
 
-  // ── Auth listener ───────────────────────────────────────────
   useEffect(() => {
     let splashTimer;
 
     supabase.auth.getSession().then(({ data: { session: s } }) => {
-      if (s) {
-        setSession(s);
-        triggerSync(s);
-        return;
-      }
+      if (s) { setSession(s); triggerSync(s); return; }
 
       const guestSession = loadGuestSession();
-      if (guestSession) {
-        setSession(guestSession);
-        triggerSync(guestSession);
-        return;
-      }
+      if (guestSession) { setSession(guestSession); triggerSync(guestSession); return; }
 
-      const cachedUser = cacheGet(CACHE_USER_KEY);
-      if (cachedUser) {
-        devLog('Utilisateur charge depuis le cache sans session');
-      }
       splashTimer = setTimeout(() => setScreen('login'), 1800);
     });
 
@@ -588,12 +580,12 @@ export default function App() {
           setSession(s);
           await triggerSync(s);
         } else if (event === 'SIGNED_OUT') {
-          // Nettoie le cache au logout pour éviter la fuite de données
           cacheDel(CACHE_USER_KEY);
           cacheDel(CACHE_LEADERBOARD_KEY);
+          cacheDel(CACHE_DATA_VERSION);
           cacheDel(GUEST_SESSION_KEY);
           setUser(null); setSyncData(null); setSession(null);
-          setSyncStatus('idle');
+          setSyncStatus('idle'); setDataVersion('');
           setScreen('login');
         } else if (event === 'TOKEN_REFRESHED' && s) {
           setSession(s);
@@ -608,23 +600,20 @@ export default function App() {
   }, []);
 
   // ═══════════════════════════════════════════════════════════
-  //  SYNC PRINCIPAL
+  //  SYNC PRINCIPAL — Phase 5 : data_version comparison
   // ═══════════════════════════════════════════════════════════
 
   const triggerSync = async (s) => {
     setScreen('syncing');
     setSyncStatus('syncing');
 
-    // ── Nom d'affichage depuis les metadata Supabase ───────────
     const meta     = s.user?.user_metadata || {};
     const email    = s.user?.email || '';
     const username = getDisplayNameFromMeta(meta, email);
 
-    // ── Tentative de chargement du cache AVANT l'appel réseau ──
-    // → L'app est utilisable immédiatement si le backend répond lentement
     const cachedUser = cacheGet(CACHE_USER_KEY);
     if (cachedUser) {
-      devLog('📦 Données utilisateur chargées depuis le cache (affichage immédiat)');
+      devLog('📦 Données utilisateur chargées depuis le cache');
       setUser(cachedUser);
     }
 
@@ -638,11 +627,7 @@ export default function App() {
           'Content-Type':  'application/json',
           'Authorization': `Bearer ${s.access_token}`,
         },
-        body: JSON.stringify({
-          user_id:  s.user.id,
-          email,
-          username,
-        }),
+        body: JSON.stringify({ user_id: s.user.id, email, username }),
         signal: controller.signal,
       });
 
@@ -652,30 +637,33 @@ export default function App() {
         const data = await res.json();
 
         if (data?.user) {
-          // ── Nettoyage du nom via l'utilitaire ────────────────
-          const cleanedUser = {
-            ...data.user,
-            username: getDisplayName(data.user),
-          };
-
+          const cleanedUser = { ...data.user, username: getDisplayName(data.user) };
           setUser(cleanedUser);
           setSyncData(data.sync_info);
-
-          // ── Mise en cache pour le mode hors-ligne ────────────
           cacheSet(CACHE_USER_KEY, cleanedUser);
 
+          // ── Phase 5 : comparer data_version ──────────────────
+          const newVersion = data.sync_info?.data_version || '';
+          if (newVersion && isDataVersionChanged(newVersion)) {
+            devLog(`🔄 data_version changée (${newVersion}) → invalidation cache`);
+            cacheDel(CACHE_LEADERBOARD_KEY);   // invalide cache leaderboard
+            setCacheInvalidated(v => v + 1);   // signal aux vues pour recharger
+            saveDataVersion(newVersion);
+          } else if (newVersion) {
+            saveDataVersion(newVersion);
+          }
+          setDataVersion(newVersion);
+          // ─────────────────────────────────────────────────────
+
           setSyncStatus(data.status === 'degraded' ? 'degraded' : 'ok');
-          devLog(`✅ Sync OK — mode: ${data.status}, user: ${cleanedUser.username}`);
+          devLog(`✅ Sync OK — mode: ${data.status}, version: ${newVersion}`);
         } else {
-          // Réponse inattendue mais pas d'erreur HTTP
           const fb = buildFallbackUser(s);
           setUser(fb);
           cacheSet(CACHE_USER_KEY, fb);
           setSyncStatus('degraded');
-          devLog('⚠️ Sync: réponse sans user, fallback');
         }
       } else {
-        // Erreur HTTP — on utilise le cache s'il existe, sinon fallback
         devLog(`⚠️ Sync API ${res.status}`);
         if (!cachedUser) {
           const fb = buildFallbackUser(s);
@@ -688,8 +676,6 @@ export default function App() {
     } catch (err) {
       const isTimeout = err.name === 'AbortError';
       devLog(isTimeout ? '⚠️ Sync timeout (12s)' : `⚠️ Sync réseau: ${err.message}`);
-
-      // ── Mode hors-ligne : on charge le cache ─────────────────
       if (!cachedUser) {
         const fb = buildFallbackUser(s);
         setUser(fb);
@@ -707,18 +693,16 @@ export default function App() {
     await supabase.auth.signOut();
     cacheDel(CACHE_USER_KEY);
     cacheDel(CACHE_LEADERBOARD_KEY);
+    cacheDel(CACHE_DATA_VERSION);
     cacheDel(GUEST_SESSION_KEY);
     setUser(null); setSyncData(null); setSession(null);
-    setSyncStatus('idle');
+    setSyncStatus('idle'); setDataVersion('');
     setScreen('login');
   };
 
   const isAdmin = ADMIN_EMAILS.includes(session?.user?.email || '');
-
-  // ── Nom affiché (toujours propre) ────────────────────────────
   const displayName = user ? getDisplayName(user) : '—';
 
-  // ── Context ─────────────────────────────────────────────────
   const ctx = {
     user,
     setUser,
@@ -729,7 +713,8 @@ export default function App() {
     API_BASE,
     apiFetch,
     isAdmin,
-    // Expose les helpers cache pour les vues enfants (ex: Dashboard)
+    dataVersion,
+    cacheInvalidated,  // incrément quand data_version change
     cacheSet,
     cacheGet,
     CACHE_LEADERBOARD_KEY,
@@ -739,7 +724,6 @@ export default function App() {
     ? [...NAV_ITEMS, { id: 'admin', icon: 'ADMIN', label: 'Admin' }]
     : NAV_ITEMS;
 
-  // ── Routing ──────────────────────────────────────────────────
   if (screen === 'splash')  return <SplashScreen />;
   if (screen === 'login')   return <AuthScreen onSuccess={handleAuthSuccess} initialError={hashError} />;
   if (screen === 'syncing') return <SyncScreen />;
@@ -748,7 +732,6 @@ export default function App() {
     <AppContext.Provider value={ctx}>
       <div className="app-shell">
 
-        {/* ── HEADER ──────────────────────────────────────────── */}
         <header className="app-header">
           <div className="header-brand">
             <span className="header-ball">⚽</span>
@@ -759,9 +742,7 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {/* Indicateur de synchronisation visuel */}
             <SyncIndicator syncStatus={syncStatus} />
-
             <button className="header-user-pill" onClick={handleLogout} title="Se déconnecter">
               <span className="pill-name">{displayName}</span>
               <span className="pill-score">{(user?.total ?? 0).toLocaleString()} pts</span>
@@ -769,7 +750,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* ── VUE ACTIVE ──────────────────────────────────────── */}
         <main className="app-content">
           {activeTab === 'dashboard'   && <Dashboard />}
           {activeTab === 'myteam'      && <MyTeam />}
@@ -779,7 +759,6 @@ export default function App() {
           {activeTab === 'admin'       && isAdmin && <AdminPanel />}
         </main>
 
-        {/* ── BOTTOM NAV ──────────────────────────────────────── */}
         <nav className="bottom-nav">
           {navItems.map(item => (
             <button
@@ -801,7 +780,6 @@ export default function App() {
   );
 }
 
-// ── Logger silencieux en prod ──────────────────────────────────
 function devLog(msg) {
   if (import.meta.env.DEV) console.log(`[App] ${msg}`);
 }

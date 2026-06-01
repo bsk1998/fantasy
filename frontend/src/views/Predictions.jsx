@@ -2,29 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../App";
 
 const GROUPS = {
-  "Groupe A": ["USA", "Canada", "Mexique", "Jamaïque"],
-  "Groupe B": ["France", "Belgique", "Maroc", "Tunisie"],
-  "Groupe C": ["Brésil", "Argentine", "Uruguay", "Colombie"],
-  "Groupe D": ["Angleterre", "Allemagne", "Pays-Bas", "Croatie"],
-  "Groupe E": ["Espagne", "Portugal", "Italie", "Suisse"],
-  "Groupe F": ["Japon", "Corée du Sud", "Australie", "Iran"],
-  "Groupe G": ["Sénégal", "Algérie", "Nigeria", "Ghana"],
-  "Groupe H": ["Côte d'Ivoire", "Égypte", "Cameroun", "Mali"],
+
 };
 
 const KNOCKOUT_ROUNDS = [
-  ["r16", "Huitièmes", 8],
-  ["qf", "Quarts", 4],
-  ["sf", "Demi-finales", 2],
-  ["third", "3e place", 1],
-  ["final", "Finale", 1],
+  
 ];
 
 const ANNEXES = [
-  ["scorers", "Top buteurs"],
-  ["assists", "Top passeurs"],
-  ["players", "Top joueurs"],
-  ["young", "Top jeunes"],
+ 
 ];
 
 const emptyAnnexes = ANNEXES.reduce((acc, [key]) => {
