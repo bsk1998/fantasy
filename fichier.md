@@ -4,3 +4,7 @@ AdminPanel.jsx:31  POST http://localhost:8000/api/admin/login 404 (Not Found)
 
 
 et dit moi si le boutton  OUVRIR-APPLICATION correctement avec les ajustement que je fais dans les codes
+
+
+
+ecrit tout les codes complet et envoie moi le fichier final et où le maitre sans expliquer les problemes 

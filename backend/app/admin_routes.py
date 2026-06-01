@@ -124,7 +124,6 @@ def _log_action(action: str, target_type: str, target_id: str = None, details: s
 #  ROUTES
 # ════════════════════════════════════════════════════════════════════════
 
-# ✅ APRÈS — modèle Pydantic concret
 class RulesParseRequest(BaseModel):
     raw_rules_text: str
 
