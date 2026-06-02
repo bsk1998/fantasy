@@ -36,15 +36,18 @@ export default function AdminPanel() {
 
       if (res.ok) {
         const data = await res.json();
+        console.log("Admin login successful:", data); // Log succès
         setToken(data.access_token);
         localStorage.setItem("admin_token", data.access_token);
         setUsername("");
         setPassword("");
       } else {
         const err = await res.json();
+        console.error("Admin login failed:", res.status, err); // Log échec avec statut et erreur
         setLoginError(err.detail || "Connexion échouée");
       }
     } catch (err) {
+      console.error("Admin login network error:", err); // Log erreurs réseau
       setLoginError(err.message);
     }
   };

@@ -82,7 +82,12 @@ ADMIN_JWT_EXPIRY_HOURS = 24
 
 def verify_admin_credentials(username: str, password: str) -> bool:
     """Vérifie pseudo/mdp admin."""
-    return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
+    is_valid = username == ADMIN_USERNAME and password == ADMIN_PASSWORD
+    if not is_valid:
+        logger.warning(f"Tentative de connexion admin échouée pour utilisateur: '{username}'")
+    else:
+        logger.info(f"Connexion admin réussie pour utilisateur: '{username}'")
+    return is_valid
 
 
 def generate_admin_token(username: str) -> str:

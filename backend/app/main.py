@@ -114,6 +114,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logging.getLogger("admin_auth").setLevel(logging.INFO) # S'assurer que les logs INFO de admin_auth sont visibles
 
 API_BASE    = os.getenv("API_BASE", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
