@@ -266,8 +266,8 @@ app.add_middleware(
 )
 
 if ADMIN_AVAILABLE:
-    app.include_router(admin_router)
-    logger.info("✅ Admin routes incluses")
+    app.include_router(admin_router, prefix="/api/admin")
+    logger.info("✅ Admin routes incluses avec préfixe /api/admin")
 
 
 # ────────────────────────────────────────────────────────────────────────
