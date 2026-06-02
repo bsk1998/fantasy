@@ -7,7 +7,12 @@ Routes principales + auth email/password + admin panel
 import logging
 import os
 import asyncio
-from datetime import datetime
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -16,8 +21,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-import jwt as pyjwt
 from sqlalchemy import text
+
+
+class SimpleJWT:
+    @staticmethod
+    def encode(payload: dict, secret: str, algorithm: str = "HS256") -> str:
+        header = {"alg": algorithm, "typ": "JWT"}
+        signing_input = ".".join([
+            SimpleJWT._b64url(json.dumps(header, separators=(",", ":")).encode()),
+            SimpleJWT._b64url(json.dumps(payload, separators=(",", ":")).encode()),
+        ])
+        signature = hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+        return f"{signing_input}.{SimpleJWT._b64url(signature)}"
+
+    @staticmethod
+    def decode(token: str, secret: str, algorithms=None) -> dict:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+        signing_input = f"{header_b64}.{payload_b64}"
+        expected = hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(SimpleJWT._b64url(expected), signature_b64):
+            raise ValueError("Invalid token signature")
+        payload = json.loads(SimpleJWT._b64url_decode(payload_b64))
+        exp = payload.get("exp")
+        if exp is not None and int(exp) < int(datetime.utcnow().timestamp()):
+            raise ValueError("Expired token")
+        return payload
+
+    @staticmethod
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    @staticmethod
+    def _b64url_decode(data: str) -> bytes:
+        padding = "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(data + padding)
+
+
+pyjwt = SimpleJWT
 
 # ────────────────────────────────────────────────────────────────────────
 #  Imports internes
@@ -25,13 +66,21 @@ from sqlalchemy import text
 
 try:
     from app.database import SessionLocal, engine
-    from app.models import Base, User, TeamNation, Player, Coach, MatchResult, PredictionScore
+    from app.models import (
+        Base, User, TeamNation, Player, Coach, MatchResult, PredictionScore,
+        PredictionTableau, PredictionAnnexes, FantasyRoster,
+    )
+    from app.simulation_data import (
+        build_fallback_coaches, build_fallback_matches, build_fallback_players,
+        build_fallback_teams,
+    )
+    from app import admin_models  # noqa: F401 - registers admin tables on Base.metadata
     DB_AVAILABLE = True
     MODELS_AVAILABLE = True
 except ImportError as e:
     DB_AVAILABLE = False
     MODELS_AVAILABLE = False
-    print(f"❌ DB/Models import erreur : {e}")
+    print(f"DB/Models import erreur : {e}")
 
 try:
     from app.admin_routes import router as admin_router
@@ -39,21 +88,21 @@ try:
     ADMIN_AVAILABLE = True
 except ImportError as e:
     ADMIN_AVAILABLE = False
-    print(f"⚠️ Admin routes non disponibles : {e}")
+    print(f"Admin routes non disponibles : {e}")
 
 try:
     from app.updater import start_scheduler, get_matchs_actuels, tache_mise_a_jour_quotidienne
     UPDATER_AVAILABLE = True
 except ImportError as e:
     UPDATER_AVAILABLE = False
-    print(f"⚠️ Updater non disponible : {e}")
+    print(f"Updater non disponible : {e}")
 
 try:
     from app.scraper import get_scraping_status
     SCRAPER_AVAILABLE = True
 except ImportError as e:
     SCRAPER_AVAILABLE = False
-    print(f"⚠️ Scraper non disponible : {e}")
+    print(f"Scraper non disponible : {e}")
 
 # ────────────────────────────────────────────────────────────────────────
 #  Configuration
@@ -83,6 +132,7 @@ async def lifespan(app: FastAPI):
     if DB_AVAILABLE and MODELS_AVAILABLE:
         try:
             Base.metadata.create_all(bind=engine)
+            _ensure_sqlite_columns()
             logger.info("✅ Base de données initialisée")
         except Exception as e:
             logger.error(f"❌ DB init erreur : {e}")
@@ -163,6 +213,39 @@ def _decode_token(token: str) -> Optional[dict]:
         return None
 
 
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000)
+    return f"pbkdf2_sha256${salt}${digest.hex()}"
+
+
+def _verify_password(password: str, stored_password: str) -> bool:
+    if not stored_password:
+        return False
+    if not stored_password.startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(password, stored_password)
+    try:
+        _, salt, expected = stored_password.split("$", 2)
+    except ValueError:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
+    return hmac.compare_digest(digest, expected)
+
+
+def _create_user_token(user: "User") -> str:
+    now = datetime.utcnow()
+    return pyjwt.encode(
+        {
+            "sub": user.email,
+            "user_id": user.id,
+            "exp": int((now + timedelta(days=7)).timestamp()),
+            "iat": int(now.timestamp()),
+        },
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
 # ────────────────────────────────────────────────────────────────────────
 #  Initialisation FastAPI
 # ────────────────────────────────────────────────────────────────────────
@@ -217,7 +300,7 @@ async def register(request: Request):
         user = User(
             email=email,
             username=username,
-            hashed_password=password,   # ⚠️ en prod : hasher avec bcrypt
+            hashed_password=_hash_password(password),
             score_fantasy=0,
             score_predictor_scores=0,
             score_predictor_tableaux=0,
@@ -227,10 +310,7 @@ async def register(request: Request):
         db.commit()
         db.refresh(user)
 
-        token = pyjwt.encode(
-            {"sub": email, "user_id": user.id},
-            JWT_SECRET, algorithm="HS256"
-        )
+        token = _create_user_token(user)
         return {
             "access_token": token,
             "user": {
@@ -262,13 +342,14 @@ async def login(request: Request):
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.email == email).first()
-        if not user or user.hashed_password != password:
+        if not user or not _verify_password(password, user.hashed_password):
             raise HTTPException(401, "Email ou mot de passe incorrect")
 
-        token = pyjwt.encode(
-            {"sub": email, "user_id": user.id},
-            JWT_SECRET, algorithm="HS256"
-        )
+        if not user.hashed_password.startswith("pbkdf2_sha256$"):
+            user.hashed_password = _hash_password(password)
+            db.commit()
+
+        token = _create_user_token(user)
         total = (
             (user.score_fantasy or 0)
             + (user.score_predictor_scores or 0)
@@ -352,22 +433,22 @@ async def get_matches():
         try:
             db = SessionLocal()
             rows = db.execute(text("""
-                SELECT match_id, display_order, home, away, match_group,
-                       match_date, home_score, away_score,
-                       status, is_finished, is_locked
+                SELECT id, sofascore_id, home, away, "group" AS match_group,
+                       date AS match_date, home_score, away_score,
+                       status, is_locked, round
                 FROM match_results
-                ORDER BY COALESCE(display_order, 9999), match_id
+                ORDER BY id
             """)).mappings().all()
             if rows:
                 return [{
-                    "id":          r["match_id"],
+                    "id":          r["sofascore_id"] or str(r["id"]),
                     "home":        r["home"],
                     "away":        r["away"],
                     "group":       r["match_group"],
                     "date":        r["match_date"],
                     "home_score":  r["home_score"],
                     "away_score":  r["away_score"],
-                    "is_finished": bool(r["is_finished"]),
+                    "is_finished": (r["status"] or "").lower() in {"finished", "played", "closed"},
                     "is_locked":   bool(r["is_locked"]),
                     "status":      r["status"] or "scheduled",
                 } for r in rows]
@@ -377,18 +458,14 @@ async def get_matches():
             if db:
                 db.close()
 
-    return {
-        "data": [],
-        "message": "Données en cours de chargement — scraping Groq en attente",
-        "groq_actif": bool(os.getenv("GROQ_API_KEY")),
-    }
+    return build_fallback_matches()
 
 
 @app.get("/api/coaches")
 async def get_coaches():
     """Retourne la liste des entraîneurs."""
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"data": [], "message": "Entraîneurs en cours de chargement"}
+        return build_fallback_coaches()
 
     db = None
     try:
@@ -411,7 +488,7 @@ async def get_coaches():
         if db:
             db.close()
 
-    return {"data": [], "message": "Entraîneurs en cours de chargement"}
+    return build_fallback_coaches()
 
 
 @app.get("/api/players")
@@ -422,7 +499,7 @@ async def get_players(
 ):
     """Retourne la liste des joueurs avec filtres."""
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"data": [], "message": "Joueurs en cours de chargement"}
+        return build_fallback_players()
 
     db = None
     try:
@@ -437,7 +514,7 @@ async def get_players(
 
         players = query.order_by(Player.price.desc()).all()
         if not players:
-            return {"data": [], "message": "Joueurs en cours de chargement"}
+            return build_fallback_players()
 
         return [{
             "id":           p.id,
@@ -453,7 +530,7 @@ async def get_players(
         } for p in players]
     except Exception as e:
         logger.error(f"GET /players : {e}")
-        return {"data": [], "message": str(e)}
+        return build_fallback_players()
     finally:
         if db:
             db.close()
@@ -463,12 +540,14 @@ async def get_players(
 async def get_teams():
     """Retourne la liste des nations."""
     if not DB_AVAILABLE or not MODELS_AVAILABLE:
-        return {"data": [], "message": "Nations en cours de chargement"}
+        return build_fallback_teams()
 
     db = None
     try:
         db = SessionLocal()
         teams = db.query(TeamNation).all()
+        if not teams:
+            return build_fallback_teams()
         return [{
             "id":           t.id,
             "name":         t.name,
@@ -478,7 +557,7 @@ async def get_teams():
         } for t in teams]
     except Exception as e:
         logger.error(f"GET /teams : {e}")
-        return {"data": [], "message": str(e)}
+        return build_fallback_teams()
     finally:
         if db:
             db.close()
@@ -592,7 +671,24 @@ async def save_bracket(
         raise HTTPException(401, "Token invalide")
 
     data = await request.json()
-    return {"status": "ok", "message": "Tableau reçu"}
+    if not DB_AVAILABLE:
+        return {"status": "ok", "message": "Tableau reçu en mode simulation"}
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        if not user:
+            raise HTTPException(404, "Utilisateur introuvable")
+        existing = db.query(PredictionTableau).filter(PredictionTableau.user_id == user.id).first()
+        bracket_data = data.get("bracket_data") or data
+        if existing:
+            existing.bracket_data = bracket_data
+        else:
+            db.add(PredictionTableau(user_id=user.id, bracket_data=bracket_data, points_earned=0))
+        db.commit()
+        return {"status": "ok", "message": "Tableau sauvegardé"}
+    finally:
+        db.close()
 
 
 @app.post("/api/predictions/annexes")
@@ -608,7 +704,24 @@ async def save_annexes(
         raise HTTPException(401, "Token invalide")
 
     data = await request.json()
-    return {"status": "ok", "message": "Annexes reçues"}
+    if not DB_AVAILABLE:
+        return {"status": "ok", "message": "Annexes reçues en mode simulation"}
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        if not user:
+            raise HTTPException(404, "Utilisateur introuvable")
+        existing = db.query(PredictionAnnexes).filter(PredictionAnnexes.user_id == user.id).first()
+        annexes_data = data.get("annexes") or data
+        if existing:
+            existing.annexes_data = annexes_data
+        else:
+            db.add(PredictionAnnexes(user_id=user.id, annexes_data=annexes_data, points_earned=0))
+        db.commit()
+        return {"status": "ok", "message": "Annexes sauvegardées"}
+    finally:
+        db.close()
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -628,7 +741,35 @@ async def save_roster(
         raise HTTPException(401, "Token invalide")
 
     data = await request.json()
-    return {"status": "ok", "message": "Équipe sauvegardée", "remaining_budget": 0}
+    if not DB_AVAILABLE:
+        return {"status": "ok", "message": "Équipe reçue en mode simulation", "remaining_budget": data.get("remaining_budget", 0)}
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        if not user:
+            raise HTTPException(404, "Utilisateur introuvable")
+
+        player_ids = [int(pid) for pid in data.get("player_ids", []) if str(pid).isdigit()]
+        coach_id = data.get("coach_id")
+        players = db.query(Player).filter(Player.id.in_(player_ids)).all() if player_ids else []
+        coach = db.query(Coach).filter(Coach.id == coach_id).first() if coach_id else None
+        remaining_budget = float(data.get("remaining_budget", 0) or 0)
+
+        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
+        if not roster:
+            roster = FantasyRoster(user_id=user.id)
+            db.add(roster)
+        roster.current_formation = data.get("formation") or "4-3-3"
+        roster.remaining_budget = remaining_budget
+        roster.players = players
+        if coach:
+            roster.coach_id = coach.id
+
+        db.commit()
+        return {"status": "ok", "message": "Équipe sauvegardée", "remaining_budget": remaining_budget}
+    finally:
+        db.close()
 
 
 # ────────────────────────────────────────────────────────────────────────

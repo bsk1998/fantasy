@@ -124,6 +124,22 @@ def _log_action(action: str, target_type: str, target_id: str = None, details: s
 #  ROUTES
 # ════════════════════════════════════════════════════════════════════════
 
+@router.post("/login", response_model=AdminLoginResponse)
+async def admin_login(req: AdminLoginRequest):
+    """Connecte l'administrateur et retourne un token JWT."""
+    username = req.username.strip()
+    if not verify_admin_credentials(username, req.password):
+        raise HTTPException(status_code=401, detail="Pseudo ou mot de passe admin incorrect")
+
+    token = generate_admin_token(username)
+    _log_action("login", "admin", target_id=username)
+
+    return AdminLoginResponse(
+        access_token=token,
+        message="Connexion admin reussie"
+    )
+
+
 class RulesParseRequest(BaseModel):
     raw_rules_text: str
 
@@ -217,7 +233,12 @@ async def inject_squad(
         # Vérifier que la nation existe
         team = db.query(TeamNation).filter(TeamNation.name == nation).first()
         if not team:
-            team = TeamNation(name=nation, is_confirmed=False)
+            team = TeamNation(
+                name=nation,
+                squad_status="brouillon",
+                is_locked=False,
+                last_updated=datetime.utcnow().isoformat(),
+            )
             db.add(team)
             db.flush()
         
@@ -231,6 +252,7 @@ async def inject_squad(
                 coach = Coach(
                     name=coach_name,
                     nationality=nation,
+                    team_name=nation,
                     is_confirmed=True,
                     price=6.0,
                     wins=0,
@@ -384,13 +406,15 @@ async def add_match(
         match_result = MatchResult(
             home=home,
             away=away,
-            match_date=match_date,
-            match_group=match_group,
+            date=match_date,
+            group=match_group,
+            round=match_group or "Group stage",
             home_score=home_score,
             away_score=away_score,
             status="scheduled" if home_score is None else "finished",
             is_finished=home_score is not None,
             is_locked=False,
+            last_updated=datetime.utcnow().isoformat(),
         )
         db.add(match_result)
         db.commit()
@@ -404,7 +428,7 @@ async def add_match(
                 "id": match_result.id,
                 "home": match_result.home,
                 "away": match_result.away,
-                "date": match_result.match_date,
+                "date": match_result.date,
             }
         }
     except Exception as e:
@@ -451,6 +475,7 @@ async def add_coach(
         coach = Coach(
             name=name,
             nationality=nationality,
+            team_name=nationality,
             price=price,
             is_confirmed=True,
             wins=0,
@@ -507,7 +532,7 @@ async def get_rules(admin: dict = Depends(verify_admin)):
         raise HTTPException(500, str(e))
 
 
-@router.post("/rules/parse")
+@router.post("/rules/parse-legacy", include_in_schema=False)
 async def parse_rules_endpoint(req: BaseModel = None, admin: dict = Depends(verify_admin)):
     """Parse un texte décrivant des règles."""
     if not hasattr(req, 'raw_rules_text'):
