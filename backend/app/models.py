@@ -191,18 +191,22 @@ class Complaint(Base):
     __tablename__ = 'complaints'
     id               = Column(Integer, primary_key=True, index=True)
     user_id          = Column(Integer, ForeignKey('users.id'), nullable=False)
-    match_id         = Column(String, nullable=True)
-    player_id        = Column(Integer, ForeignKey('players.id'), nullable=True)
+    category         = Column(String, nullable=False) # Ex: 'score_error', 'points_calc'
+    priority         = Column(String, default="medium", nullable=False) # Ex: 'low', 'medium', 'high'
+    title            = Column(String(80), nullable=False) # Short summary of the complaint
     description      = Column(String, nullable=False)
-    stat_claimed     = Column(String, nullable=True)
-    status           = Column(String, default="pending", nullable=False)
-    ai_analysis      = Column(String, nullable=True)
-    ai_verdict       = Column(String, nullable=True)
-    ai_confidence    = Column(Integer, nullable=True)
-    admin_note       = Column(String, nullable=True)
-    corrected_stats  = Column(String, nullable=True)
-    created_at       = Column(String, nullable=False)
-    resolved_at      = Column(String, nullable=True)
+    match_id         = Column(String, nullable=True) # Reference to MatchResult.sofascore_id
+    player_id        = Column(Integer, ForeignKey('players.id'), nullable=True) # Reference to Player.id
+    stat_claimed     = Column(String, nullable=True) # Specific stat claimed to be wrong (e.g. "buts", "clean_sheet")
+    status           = Column(String, default="pending", nullable=False) # 'pending', 'processing', 'approved', 'rejected'
+    ai_analysis      = Column(String, nullable=True) # AI detailed analysis
+    ai_verdict       = Column(String, nullable=True) # AI verdict: 'approved', 'rejected', 'needs_investigation'
+    ai_confidence    = Column(Integer, nullable=True) # AI confidence level (0-100)
+    admin_note       = Column(String, nullable=True) # Administrator's manual notes
+    corrected_stats  = Column(String, nullable=True) # If stats were corrected, a JSON string of changes
+    created_at       = Column(DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at      = Column(DateTime, nullable=True)
+
     user   = relationship("User",   back_populates="complaints", foreign_keys=[user_id])
     player = relationship("Player", foreign_keys=[player_id])
 

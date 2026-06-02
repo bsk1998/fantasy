@@ -68,12 +68,13 @@ try:
     from app.database import SessionLocal, engine
     from app.models import (
         Base, User, TeamNation, Player, Coach, MatchResult, PredictionScore,
-        PredictionTableau, PredictionAnnexes, FantasyRoster,
+        PredictionTableau, PredictionAnnexes, FantasyRoster, League, GroupStanding, SyncLog, Complaint, # Added Complaint
     )
     from app.simulation_data import (
         build_fallback_coaches, build_fallback_matches, build_fallback_players,
         build_fallback_teams,
     )
+    from app.admin_models import AdminTournamentConfig # Import AdminTournamentConfig for bracket/annexes lock
     from app import admin_models  # noqa: F401 - registers admin tables on Base.metadata
     DB_AVAILABLE = True
     MODELS_AVAILABLE = True
@@ -600,6 +601,35 @@ async def get_leaderboard():
 #  ROUTES PRÉDICTIONS
 # ────────────────────────────────────────────────────────────────────────
 
+@app.get("/api/predictions/score")
+async def get_user_prediction_scores(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Retourne les pronostics de scores de l'utilisateur."""
+    if not credentials:
+        raise HTTPException(401, "Token manquant")
+    payload = _decode_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(401, "Token invalide")
+
+    if not DB_AVAILABLE:
+        return JSONResponse(content=[], status_code=200)
+
+    db = SessionLocal()
+    try:
+        user_id = payload.get("user_id")
+        predictions = db.query(PredictionScore).filter(PredictionScore.user_id == user_id).all()
+        return [
+            {
+                "match_id": p.match_id,
+                "predicted_home_score": p.predicted_home_score,
+                "predicted_away_score": p.predicted_away_score,
+                "is_locked": p.is_locked,
+            }
+            for p in predictions
+        ]
+    finally:
+        db.close()
+
+
 @app.post("/api/predictions/score")
 async def save_prediction_score(
     request: Request,
@@ -613,7 +643,7 @@ async def save_prediction_score(
         raise HTTPException(401, "Token invalide")
 
     data = await request.json()
-    match_id       = str(data.get("match_id", ""))
+    match_id = str(data.get("match_id", ""))
     predicted_home = data.get("predicted_home")
     predicted_away = data.get("predicted_away")
 
@@ -625,17 +655,23 @@ async def save_prediction_score(
 
     db = SessionLocal()
     try:
-        email = payload.get("sub")
-        user  = db.query(User).filter(User.email == email).first()
+        user_id = payload.get("user_id") # Use user_id from token
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
 
+        # Check if match is locked (using MatchResult model)
+        match_info = db.query(MatchResult).filter(MatchResult.sofascore_id == match_id).first()
+        if match_info and match_info.is_locked:
+            raise HTTPException(423, "Ce match est verrouillé et les pronostics sont fermés.")
+
         existing = db.query(PredictionScore).filter(
-            PredictionScore.user_id  == user.id,
+            PredictionScore.user_id == user.id,
             PredictionScore.match_id == match_id,
         ).first()
 
         if existing:
+            # Redundant check but good for safety if match_info isn't found
             if existing.is_locked:
                 raise HTTPException(423, "Ce pronostic est verrouillé")
             existing.predicted_home_score = int(predicted_home)
@@ -647,12 +683,33 @@ async def save_prediction_score(
                 predicted_home_score=int(predicted_home),
                 predicted_away_score=int(predicted_away),
                 points_earned=0,
-                is_locked=False,
+                is_locked=False, # Initial prediction is not locked, will be locked by scraper
             )
             db.add(pred)
 
         db.commit()
         return {"status": "ok", "message": "Pronostic sauvegardé"}
+    finally:
+        db.close()
+
+
+@app.get("/api/predictions/bracket")
+async def get_user_prediction_bracket(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Retourne le tableau de pronostics (bracket) de l'utilisateur."""
+    if not credentials:
+        raise HTTPException(401, "Token manquant")
+    payload = _decode_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(401, "Token invalide")
+
+    if not DB_AVAILABLE:
+        return JSONResponse(content={}, status_code=200)
+
+    db = SessionLocal()
+    try:
+        user_id = payload.get("user_id")
+        prediction = db.query(PredictionTableau).filter(PredictionTableau.user_id == user_id).first()
+        return prediction.bracket_data if prediction else {}
     finally:
         db.close()
 
@@ -675,9 +732,23 @@ async def save_bracket(
 
     db = SessionLocal()
     try:
-        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        user_id = payload.get("user_id") # Use user_id from token
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
+
+        # Check if tournament is locked (e.g., via AdminTournamentConfig.is_locked or a specific match lock)
+        # For bracket, it's usually locked before the first match starts.
+        tournament_config = db.query(AdminTournamentConfig).first()
+        if tournament_config and tournament_config.start_date:
+            try:
+                tournament_start = datetime.fromisoformat(tournament_config.start_date)
+                if datetime.utcnow() >= tournament_start:
+                    raise HTTPException(423, "Le tableau est verrouillé après le début du tournoi.")
+            except ValueError:
+                logger.warning(f"Invalid start_date format in AdminTournamentConfig: {tournament_config.start_date}")
+
+
         existing = db.query(PredictionTableau).filter(PredictionTableau.user_id == user.id).first()
         bracket_data = data.get("bracket_data") or data
         if existing:
@@ -686,6 +757,27 @@ async def save_bracket(
             db.add(PredictionTableau(user_id=user.id, bracket_data=bracket_data, points_earned=0))
         db.commit()
         return {"status": "ok", "message": "Tableau sauvegardé"}
+    finally:
+        db.close()
+
+
+@app.get("/api/predictions/annexes")
+async def get_user_prediction_annexes(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Retourne les prédictions annexes de l'utilisateur."""
+    if not credentials:
+        raise HTTPException(401, "Token manquant")
+    payload = _decode_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(401, "Token invalide")
+
+    if not DB_AVAILABLE:
+        return JSONResponse(content={}, status_code=200)
+
+    db = SessionLocal()
+    try:
+        user_id = payload.get("user_id")
+        prediction = db.query(PredictionAnnexes).filter(PredictionAnnexes.user_id == user_id).first()
+        return prediction.annexes_data if prediction else {}
     finally:
         db.close()
 
@@ -708,9 +800,21 @@ async def save_annexes(
 
     db = SessionLocal()
     try:
-        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        user_id = payload.get("user_id") # Use user_id from token
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
+
+        # Annexes are typically locked before the tournament starts, similar to bracket
+        tournament_config = db.query(AdminTournamentConfig).first()
+        if tournament_config and tournament_config.start_date:
+            try:
+                tournament_start = datetime.fromisoformat(tournament_config.start_date)
+                if datetime.utcnow() >= tournament_start:
+                    raise HTTPException(423, "Les prédictions annexes sont verrouillées après le début du tournoi.")
+            except ValueError:
+                logger.warning(f"Invalid start_date format in AdminTournamentConfig: {tournament_config.start_date}")
+
         existing = db.query(PredictionAnnexes).filter(PredictionAnnexes.user_id == user.id).first()
         annexes_data = data.get("annexes") or data
         if existing:
@@ -726,6 +830,71 @@ async def save_annexes(
 # ────────────────────────────────────────────────────────────────────────
 #  ROUTES FANTASY ROSTER
 # ────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/fantasy/roster")
+async def get_user_roster(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Retourne l'équipe Fantasy de l'utilisateur."""
+    if not credentials:
+        raise HTTPException(401, "Token manquant")
+    payload = _decode_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(401, "Token invalide")
+
+    if not DB_AVAILABLE:
+        return JSONResponse(content={
+            "player_ids": [],
+            "players_data": [],
+            "coach_id": None,
+            "coach_data": None,
+            "current_formation": "4-3-3",
+            "remaining_budget": 100.0,
+        }, status_code=200)
+
+    db = SessionLocal()
+    try:
+        user_id = payload.get("user_id")
+        roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user_id).first()
+        if not roster:
+            return JSONResponse(content={
+                "player_ids": [],
+                "players_data": [],
+                "coach_id": None,
+                "coach_data": None,
+                "current_formation": "4-3-3",
+                "remaining_budget": 100.0,
+            }, status_code=200)
+        
+        # Hydrate player and coach data for the frontend
+        players_in_roster = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "position": p.position,
+                "nationality": p.nationality,
+                "price": p.price,
+                "club": p.club,
+            } for p in roster.players
+        ]
+        coach_in_roster = None
+        if roster.coach:
+            coach_in_roster = {
+                "id": roster.coach.id,
+                "name": roster.coach.name,
+                "nationality": roster.coach.nationality,
+                "price": roster.coach.price,
+            }
+        
+        return {
+            "player_ids": [p.id for p in roster.players],
+            "players_data": players_in_roster,
+            "coach_id": roster.coach_id,
+            "coach_data": coach_in_roster,
+            "current_formation": roster.current_formation,
+            "remaining_budget": roster.remaining_budget,
+        }
+    finally:
+        db.close()
+
 
 @app.post("/api/fantasy/roster")
 async def save_roster(
@@ -745,28 +914,52 @@ async def save_roster(
 
     db = SessionLocal()
     try:
-        user = db.query(User).filter(User.email == payload.get("sub")).first()
+        user_id = payload.get("user_id") # Use user_id from token
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
 
         player_ids = [int(pid) for pid in data.get("player_ids", []) if str(pid).isdigit()]
         coach_id = data.get("coach_id")
+
         players = db.query(Player).filter(Player.id.in_(player_ids)).all() if player_ids else []
         coach = db.query(Coach).filter(Coach.id == coach_id).first() if coach_id else None
-        remaining_budget = float(data.get("remaining_budget", 0) or 0)
+        
+        # Re-calculate remaining budget on backend to prevent client-side tampering
+        total_player_cost = sum(p.price for p in players)
+        total_coach_cost = coach.price if coach else 0.0
+        calculated_remaining_budget = 100.0 - total_player_cost - total_coach_cost # Max budget is 100M
+
+        if calculated_remaining_budget < 0:
+            raise HTTPException(400, "Budget dépassé : Le coût de l'équipe est supérieur à 100M€.")
+            
+        # Validate roster constraints (3 players per nation, coach nationality conflict)
+        player_nationalities = {}
+        for player in players:
+            player_nationalities[player.nationality] = player_nationalities.get(player.nationality, 0) + 1
+        
+        for nation, count in player_nationalities.items():
+            if count > 3:
+                raise HTTPException(400, f"Limite de 3 joueurs par nation ({nation}) dépassée.")
+
+        if coach and coach.nationality in player_nationalities:
+            raise HTTPException(400, f"Conflit de nationalité : L'entraîneur ({coach.nationality}) ne peut pas avoir de joueurs de sa nation.")
+
 
         roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
         if not roster:
             roster = FantasyRoster(user_id=user.id)
             db.add(roster)
         roster.current_formation = data.get("formation") or "4-3-3"
-        roster.remaining_budget = remaining_budget
+        roster.remaining_budget = calculated_remaining_budget # Use calculated budget
         roster.players = players
         if coach:
             roster.coach_id = coach.id
+        else:
+            roster.coach_id = None # Clear coach if none selected
 
         db.commit()
-        return {"status": "ok", "message": "Équipe sauvegardée", "remaining_budget": remaining_budget}
+        return {"status": "ok", "message": "Équipe sauvegardée", "remaining_budget": calculated_remaining_budget}
     finally:
         db.close()
 
@@ -870,6 +1063,7 @@ async def api_info():
             "admin_panel":          ADMIN_AVAILABLE,
             "groq_integration":     bool(GROQ_API_KEY),
             "automatic_scraping":   UPDATER_AVAILABLE,
+            "complaint_system":     True, # New: Complaint system
         },
     }
 
