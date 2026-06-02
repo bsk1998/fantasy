@@ -132,8 +132,7 @@ async def lifespan(app: FastAPI):
     if DB_AVAILABLE and MODELS_AVAILABLE:
         try:
             Base.metadata.create_all(bind=engine)
-            _ensure_sqlite_columns()
-            logger.info("✅ Base de données initialisée")
+            logger.info("✅ Base de données initialisée via SQLAlchemy Base.metadata.create_all")
         except Exception as e:
             logger.error(f"❌ DB init erreur : {e}")
 
