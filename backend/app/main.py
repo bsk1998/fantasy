@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -132,6 +133,7 @@ API_BASE     = os.getenv("API_BASE", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 JWT_SECRET   = os.getenv("JWT_SECRET", "fantasy-secret-2026")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+IS_PROD      = bool(os.getenv("PRODUCTION", ""))
 
 security = HTTPBearer(auto_error=False)
 
@@ -269,7 +271,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ─── CORS — liste plate (pas de liste imbriquée) ─────────────────
+# ─── CORS ────────────────────────────────────────────────────────
+# Liste explicite d'origines autorisées
 _allowed_origins = [
     FRONTEND_URL,
     "http://localhost:5173",
@@ -277,17 +280,35 @@ _allowed_origins = [
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
+
+# Ajout des origines depuis la variable d'environnement ALLOWED_ORIGINS
 _env_origins = os.getenv("ALLOWED_ORIGINS", "")
 if _env_origins:
-    _allowed_origins.extend([o.strip() for o in _env_origins.split(",") if o.strip()])
+    for _o in _env_origins.split(","):
+        _o = _o.strip()
+        if _o and _o not in _allowed_origins:
+            _allowed_origins.append(_o)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if not IS_PROD:
+    # En développement : accepte toutes les origines du réseau local (192.168.x.x)
+    # via allow_origin_regex — nécessaire pour accès depuis téléphone/autre PC
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_origin_regex=r"http://192\.168\.\d+\.\d+(:\d+)?",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info("✅ CORS dev : origines LAN 192.168.x.x acceptées")
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 if ADMIN_AVAILABLE:
     app.include_router(admin_router, prefix="/api/admin")
