@@ -21,6 +21,7 @@ import subprocess
 import time
 import webbrowser
 import platform
+import shutil
 from pathlib import Path
 import signal
 import socket
@@ -143,6 +144,10 @@ def setup_backend():
     
     # Créer le venv
     venv_dir = backend_dir / "venv"
+    if venv_dir.exists() and not (venv_dir / "pyvenv.cfg").exists():
+        print_warning("Virtualenv backend incomplet detecte, reconstruction...")
+        shutil.rmtree(venv_dir)
+
     if not venv_dir.exists():
         print_info("Création du virtualenv...")
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)

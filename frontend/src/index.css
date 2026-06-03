@@ -1947,6 +1947,63 @@ h3 {
   pointer-events: none;
 }
 
+.known-emails-toggle {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.known-emails-toggle:hover {
+  background: var(--surface-3);
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+.known-emails-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.known-emails-panel p {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.known-email-item {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.known-email-item:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .guest-submit {
   margin-top: 0;
   background: linear-gradient(135deg, #00e676, #38bdf8);

@@ -1,9 +1,29 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../App";
 import Dashboard from "./Dashboard";
 
+const KNOWN_EMAILS_KEY = "known_user_emails";
+
+function readKnownEmails() {
+  try {
+    return JSON.parse(localStorage.getItem(KNOWN_EMAILS_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function rememberKnownEmail(value) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return [];
+
+  const next = [normalized, ...readKnownEmails().filter((item) => item !== normalized)].slice(0, 8);
+  localStorage.setItem(KNOWN_EMAILS_KEY, JSON.stringify(next));
+  localStorage.setItem("user_email", normalized);
+  return next;
+}
+
 export default function Home() {
-  const { user, setUser, setLoading, apiFetch } = useApp();
+  const { user, setUser, setSession, apiFetch } = useApp();
 
   const [mode,     setMode]     = useState("login"); // "login" | "register"
   const [email,    setEmail]    = useState("");
@@ -13,6 +33,12 @@ export default function Home() {
   const [error,    setError]    = useState(null);
   const [info,     setInfo]     = useState(null);
   const [busy,     setBusy]     = useState(false);
+  const [showKnownEmails, setShowKnownEmails] = useState(false);
+  const [knownEmails, setKnownEmails] = useState(() => readKnownEmails());
+
+  useEffect(() => {
+    setKnownEmails(readKnownEmails());
+  }, []);
 
   // Si connecté → afficher le dashboard
   if (user) return <Dashboard />;
@@ -52,8 +78,10 @@ export default function Home() {
       // Stocker le token si présent
       if (data.access_token) {
         localStorage.setItem("auth_token", data.access_token);
+        setSession({ access_token: data.access_token });
       }
 
+      setKnownEmails(rememberKnownEmail(email));
       setUser(data.user || data);
     } catch (err) {
       setError("Impossible de joindre le serveur.");
@@ -63,6 +91,7 @@ export default function Home() {
   };
 
   const handleGuest = () => {
+    setSession(null);
     setUser({ username: "Invité", email: "", total: 0, isGuest: true });
   };
 
@@ -161,6 +190,39 @@ export default function Home() {
                 : mode === "login" ? "Se connecter" : "Créer mon compte"
               }
             </button>
+
+            <button
+              className="known-emails-toggle"
+              type="button"
+              onClick={() => {
+                setKnownEmails(readKnownEmails());
+                setShowKnownEmails((value) => !value);
+              }}
+            >
+              Emails sur cet appareil
+            </button>
+
+            {showKnownEmails && (
+              <div className="known-emails-panel">
+                {knownEmails.length > 0 ? (
+                  knownEmails.map((item) => (
+                    <button
+                      className="known-email-item"
+                      type="button"
+                      key={item}
+                      onClick={() => {
+                        setEmail(item);
+                        setShowKnownEmails(false);
+                      }}
+                    >
+                      {item}
+                    </button>
+                  ))
+                ) : (
+                  <p>Aucun email enregistre sur cet appareil.</p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Mode invité */}

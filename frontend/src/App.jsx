@@ -6,6 +6,7 @@
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { API_BASE } from "./config";
 import "./App.css";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -23,8 +24,6 @@ import AdminPanel from "./views/AdminPanel";
 // ─────────────────────────────────────────────────────────────────────
 //  Configuration
 // ─────────────────────────────────────────────────────────────────────
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 // ─────────────────────────────────────────────────────────────────────
 //  Contexte Global App
@@ -50,6 +49,7 @@ export const apiFetch = (path, options = {}) =>
 function AppProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState(null);
   const [dataVersion, setDataVersion] = useState(localStorage.getItem("dataVersion") || "");
   const [adminToken, setAdminToken] = useState(localStorage.getItem("admin_token") || "");
   const [notification, setNotification] = useState(null);
@@ -61,6 +61,7 @@ const initApp = async () => {
     // Récupérer la session depuis localStorage si elle existe
     const token = localStorage.getItem("auth_token");
     if (token) {
+      setSession({ access_token: token });
       const res = await apiFetch("/auth/me", {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -69,6 +70,7 @@ const initApp = async () => {
         setUser(userData);
       } else {
         localStorage.removeItem("auth_token");
+        setSession(null);
       }
     }
   } catch (err) {
@@ -90,6 +92,7 @@ const initApp = async () => {
 
   const logout = () => {
     setUser(null);
+    setSession(null);
     localStorage.removeItem("auth_token");
     localStorage.removeItem("user_email");
   };
@@ -97,6 +100,8 @@ const initApp = async () => {
   const value = {
     user,
     setUser,
+    session,
+    setSession,
     loading,
     setLoading,
     dataVersion,

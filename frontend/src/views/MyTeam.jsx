@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { API_BASE } from '../config';
 import { useApp } from '../App';
+import { FALLBACK_COACHES, FALLBACK_PLAYERS } from '../worldCup2026';
 
 const nationKey = (value = '') => {
   const raw = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -58,13 +59,19 @@ export default function MyTeam() {
           || (!Array.isArray(dataCoaches) && dataCoaches.message)
           || null;
 
-        setPlayers(playersList);
-        setCoaches(coachesList);
-        if (loadingMsg) setLoadingMessage(loadingMsg);
+        setPlayers(playersList.length ? playersList : FALLBACK_PLAYERS);
+        setCoaches(coachesList.length ? coachesList : FALLBACK_COACHES);
+        setLoadingMessage(
+          loadingMsg && (!playersList.length || !coachesList.length)
+            ? `${loadingMsg} Simulation locale active en attendant les donnees officielles.`
+            : loadingMsg
+        );
 
       } catch (err) {
         console.error(err);
-        setError(err.message);
+        setPlayers(FALLBACK_PLAYERS);
+        setCoaches(FALLBACK_COACHES);
+        setLoadingMessage('Backend indisponible: simulation locale active.');
       } finally {
         setLoading(false);
       }
@@ -173,18 +180,31 @@ export default function MyTeam() {
       return;
     }
 
+    const token = session?.access_token || localStorage.getItem('auth_token');
+    if (!token) {
+      localStorage.setItem('guest_fantasy_roster', JSON.stringify({
+        player_ids: roster.map(p => p.id),
+        coach_id: selectedCoach.id,
+        formation,
+        remaining_budget: budget
+      }));
+      setSaveStatus({ type: 'success', text: 'Equipe gardee en local pour le mode invite.' });
+      return;
+    }
+
     try {
       const res = await fetch(`${API_BASE}/api/fantasy/roster`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {})
+          Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
           user_id: user?.id || session?.user?.email,
           player_ids: roster.map(p => p.id),
           coach_id: selectedCoach.id,
-          formation
+          formation,
+          remaining_budget: budget
         })
       });
       const data = await res.json().catch(() => ({}));

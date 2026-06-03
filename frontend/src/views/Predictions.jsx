@@ -1,17 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../App";
+import { ANNEXES, KNOCKOUT_ROUNDS, WC2026_GROUPS, buildFallbackMatches } from "../worldCup2026";
 
-const GROUPS = {
-
-};
-
-const KNOCKOUT_ROUNDS = [
-  
-];
-
-const ANNEXES = [
- 
-];
+const GROUPS = WC2026_GROUPS;
 
 const emptyAnnexes = ANNEXES.reduce((acc, [key]) => {
   acc[key] = ["", "", ""];
@@ -33,7 +24,9 @@ export default function Predictions() {
 
   const authHeaders = useMemo(() => ({
     "Content-Type": "application/json",
-    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+    ...((session?.access_token || localStorage.getItem("auth_token"))
+      ? { Authorization: `Bearer ${session?.access_token || localStorage.getItem("auth_token")}` }
+      : {}),
   }), [session?.access_token]);
 
   useEffect(() => {
@@ -44,9 +37,10 @@ export default function Predictions() {
       try {
         const res = await apiFetch("/matches");
         const data = await res.json();
-        if (!cancelled) setMatches(Array.isArray(data) ? data : []);
+        const list = Array.isArray(data) ? data : (data.data || []);
+        if (!cancelled) setMatches(list.length >= 72 ? list : buildFallbackMatches());
       } catch {
-        if (!cancelled) setMatches([]);
+        if (!cancelled) setMatches(buildFallbackMatches());
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -76,8 +70,13 @@ export default function Predictions() {
     }
 
     setStatus({ type: "info", text: "Sauvegarde du score..." });
+    if (!authHeaders.Authorization) {
+      localStorage.setItem("guest_score_predictions", JSON.stringify(scorePredictions));
+      setStatus({ type: "success", text: "Score garde en local pour le mode invite." });
+      return;
+    }
     try {
-      await apiFetch("/predictions/score", {
+      const res = await apiFetch("/predictions/score", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({
@@ -87,6 +86,10 @@ export default function Predictions() {
           predicted_away: Number(prediction.away),
         }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Sauvegarde refusee.");
+      }
       setStatus({ type: "success", text: "Score sauvegardé." });
     } catch {
       setStatus({ type: "error", text: "Impossible de sauvegarder ce score." });
@@ -116,12 +119,18 @@ export default function Predictions() {
   const saveBracket = async () => {
     if (!userId) return;
     setStatus({ type: "info", text: "Sauvegarde du tableau..." });
+    if (!authHeaders.Authorization) {
+      localStorage.setItem("guest_bracket_prediction", JSON.stringify({ groups: groupRanks, knockout }));
+      setStatus({ type: "success", text: "Tableau garde en local pour le mode invite." });
+      return;
+    }
     try {
-      await apiFetch("/predictions/bracket", {
+      const res = await apiFetch("/predictions/bracket", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ user_id: userId, bracket_data: { groups: groupRanks, knockout } }),
       });
+      if (!res.ok) throw new Error("Sauvegarde refusee.");
       setStatus({ type: "success", text: "Tableau sauvegardé." });
     } catch {
       setStatus({ type: "error", text: "Impossible de sauvegarder le tableau." });
@@ -131,12 +140,18 @@ export default function Predictions() {
   const saveAnnexes = async () => {
     if (!userId) return;
     setStatus({ type: "info", text: "Sauvegarde des annexes..." });
+    if (!authHeaders.Authorization) {
+      localStorage.setItem("guest_annexes_prediction", JSON.stringify(annexes));
+      setStatus({ type: "success", text: "Annexes gardees en local pour le mode invite." });
+      return;
+    }
     try {
-      await apiFetch("/predictions/annexes", {
+      const res = await apiFetch("/predictions/annexes", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ user_id: userId, annexes }),
       });
+      if (!res.ok) throw new Error("Sauvegarde refusee.");
       setStatus({ type: "success", text: "Annexes sauvegardées." });
     } catch {
       setStatus({ type: "error", text: "Impossible de sauvegarder les annexes." });
