@@ -410,6 +410,26 @@ async def inject_squad(
         db.close()
 
 
+@router.get("/squad/filled-nations")
+async def get_filled_nations(admin: dict = Depends(verify_admin)):
+    """Retourne la liste des nations dont l'effectif (joueurs + entraîneur) est complet."""
+    db = SessionLocal()
+    try:
+        filled_nations_list = []
+        nations = db.query(TeamNation).all()
+        for nation in nations:
+            has_players = db.query(Player).filter(Player.nationality == nation.name, Player.is_confirmed == True).first()
+            has_coach = db.query(Coach).filter(Coach.nationality == nation.name, Coach.is_confirmed == True).first()
+            if has_players and has_coach:
+                filled_nations_list.append(nation.name)
+        return {"status": "success", "filled_nations": filled_nations_list}
+    except Exception as e:
+        logger.error(f"get_filled_nations error: {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
 @router.post("/player/add")
 async def add_player(
     name: str = Query(...), position: str = Query(...), nationality: str = Query(...),

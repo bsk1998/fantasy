@@ -738,8 +738,27 @@ function SquadsSection({ groqKey }) {
   const [busy, setBusy]             = useState(false);
   const [fb, setFb]                 = useState(null);
   const fileRef                     = useRef(null);
+  const [filledNations, setFilledNations] = useState([]); // Problème 2: Nouvel état
 
   const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
+
+  // Problème 2: Charger les nations dont l'effectif est complet au montage
+  useEffect(() => {
+    const fetchFilledNations = async () => {
+      try {
+        const res = await adminFetch("/squad/filled-nations");
+        const data = await res.json();
+        if (res.ok && data.status === "success") {
+          setFilledNations(data.filled_nations || []);
+        } else {
+          console.error("Erreur lors de la récupération des nations complètes :", data.message);
+        }
+      } catch (e) {
+        console.error("Erreur API lors de la récupération des nations complètes :", e);
+      }
+    };
+    fetchFilledNations();
+  }, []); // Se lance une seule fois au montage
 
   const handleImageDrop = useCallback((file) => {
     if(!file||!file.type.startsWith("image/")) return;
@@ -759,26 +778,17 @@ function SquadsSection({ groqKey }) {
     if(!hasContent){ showFb("err","❌ Fournissez du texte ou une capture d'écran."); return; }
     setBusy(true); showFb("info","🤖 Groq analyse les données...",0);
     try {
-      const systemPrompt = `Tu es expert en football. Extrais la liste de joueurs et le coach depuis le contenu fourni.
-Nation : ${selectedNation}
-Retourne UNIQUEMENT ce JSON valide sans markdown :
-{"coach":"Prénom Nom ou null","players":[{"name":"Prénom Nom","position":"G|D|M|A","price":6.5}]}
-Positions : G=Gardien, D=Défenseur, M=Milieu, A=Attaquant. Prix: G=5-8, D=5-9, M=6-11, A=7-14.`;
-      const messages = inputMode==="text"
-        ? [{role:"user",content:`Nation: ${selectedNation}\n\n${promptText}`}]
-        : [{role:"user",content:[
-            {type:"image",source:{type:"base64",media_type:imageData.split(";")[0].split(":")[1],data:imageData.split(",")[1]}},
-            {type:"text",text:`Extrais l'effectif de ${selectedNation} depuis cette capture.`}
-          ]}];
-      const resp = await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,system:systemPrompt,messages})
+      // Problème 1: Appel au backend FastAPI pour le parsing
+      const rawContent = inputMode==="text" ? promptText.trim() : imageData; // Envoi de l'image en base64 si mode image
+      const res = await adminFetch("/squad/parse", {
+        method: "POST",
+        body: JSON.stringify({ nation: selectedNation, raw_squad_text: rawContent })
       });
-      const data = await resp.json();
-      const raw  = data.content?.[0]?.text || "";
-      const match = raw.match(/\{[\s\S]*\}/);
-      if(!match) throw new Error("JSON introuvable dans la réponse");
-      const parsed = JSON.parse(match[0]);
+      const data = await res.json();
+
+      if(!res.ok) throw new Error(data.message || "Erreur lors du parsing.");
+
+      const parsed = data.parsed_data; // Le backend retourne maintenant les données parsées
       if(parsed.coach) setCoachName(parsed.coach);
       if(parsed.players?.length){
         setPlayers(parsed.players.map(p=>({id:uid(),name:p.name||"",position:p.position||"M",price:p.price||6.5})));
@@ -798,7 +808,17 @@ Positions : G=Gardien, D=Défenseur, M=Milieu, A=Attaquant. Prix: G=5-8, D=5-9, 
       if(coachName) params.append("coach_name",coachName);
       const res  = await adminFetch(`/squad/inject?${params}`,{method:"POST"});
       const data = await res.json();
-      showFb(data.status==="success"?"ok":"err", data.message||"Réponse serveur");
+      // Problème 2: Mettre à jour la liste des nations complètes après injection réussie
+      if(data.status==="success"){
+        showFb("ok", data.message||"Réponse serveur");
+        const resFilled = await adminFetch("/squad/filled-nations");
+        const dataFilled = await resFilled.json();
+        if (resFilled.ok && dataFilled.status === "success") {
+          setFilledNations(dataFilled.filled_nations || []);
+        }
+      } else {
+        showFb("err", data.message||"Réponse serveur");
+      }
     } catch(e) { showFb("err","Erreur : "+e.message); }
     finally { setBusy(false); }
   };
@@ -816,9 +836,10 @@ Positions : G=Gardien, D=Défenseur, M=Milieu, A=Attaquant. Prix: G=5-8, D=5-9, 
             <div className="group-label">{group}</div>
             <div className="nation-grid">
               {nations.map(n=>(
-                <button key={n} className={`nation-chip ${selectedNation===n?"selected":""}`}
+                // Problème 2: Ajout de la classe 'filled' et de l'icône ✅
+                <button key={n} className={`nation-chip ${selectedNation===n?"selected":""} ${filledNations.includes(n)?"filled":""}`}
                   onClick={()=>{setSelectedNation(n);setPlayers([]);setCoachName("");setFb(null);}}>
-                  {n}
+                  {n} {filledNations.includes(n) && "✅"}
                 </button>
               ))}
             </div>
