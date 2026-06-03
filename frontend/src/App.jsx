@@ -1,17 +1,13 @@
 /**
  * App.jsx — Application React Fantasy Boulzazen WC 2026
  * ======================================================
- * Contexte global + routing + admin panel discret
+ * Contexte utilisateur UNIQUEMENT — admin est totalement indépendant
  */
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import { API_BASE } from "./config";
 import "./App.css";
-
-// ─────────────────────────────────────────────────────────────────────
-//  Components
-// ─────────────────────────────────────────────────────────────────────
 
 import Header from "./components/Header";
 import Navigation from "./components/Navigation";
@@ -22,20 +18,14 @@ import Leaderboard from "./views/Leaderboard";
 import AdminPanel from "./views/AdminPanel";
 
 // ─────────────────────────────────────────────────────────────────────
-//  Configuration
-// ─────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────
-//  Contexte Global App
+//  Contexte Global — UTILISATEUR SEULEMENT (pas d'admin ici)
 // ─────────────────────────────────────────────────────────────────────
 
 export const AppContext = createContext();
 
 export const useApp = () => {
   const context = useContext(AppContext);
-  if (!context) {
-    throw new Error("useApp doit être utilisé dans AppProvider");
-  }
+  if (!context) throw new Error("useApp doit être utilisé dans AppProvider");
   return context;
 };
 
@@ -43,51 +33,45 @@ export const apiFetch = (path, options = {}) =>
   fetch(`${API_BASE}/api${path}`, options);
 
 // ─────────────────────────────────────────────────────────────────────
-//  Provider
+//  Provider — gestion session utilisateur uniquement
 // ─────────────────────────────────────────────────────────────────────
 
 function AppProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [session, setSession] = useState(null);
-  const [dataVersion, setDataVersion] = useState(localStorage.getItem("dataVersion") || "");
-  const [adminToken, setAdminToken] = useState(localStorage.getItem("admin_token") || "");
+  const [user,         setUser]         = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [session,      setSession]      = useState(null);
   const [notification, setNotification] = useState(null);
 
-  // Initialisation au mount
   useEffect(() => {
-const initApp = async () => {
-  try {
-    // Récupérer la session depuis localStorage si elle existe
-    const token = localStorage.getItem("auth_token");
-    if (token) {
-      setSession({ access_token: token });
-      const res = await apiFetch("/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const userData = await res.json();
-        setUser(userData);
-      } else {
-        localStorage.removeItem("auth_token");
-        setSession(null);
+    const initApp = async () => {
+      try {
+        const token = localStorage.getItem("auth_token");
+        if (token) {
+          setSession({ access_token: token });
+          const res = await apiFetch("/auth/me", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const userData = await res.json();
+            setUser(userData);
+          } else {
+            // Token expiré ou invalide
+            localStorage.removeItem("auth_token");
+            setSession(null);
+          }
+        }
+      } catch (err) {
+        console.error("[App] Init erreur:", err);
+      } finally {
+        setLoading(false);
       }
-    }
-  } catch (err) {
-    logger.error("Init erreur:", err);
-  } finally {
-    setLoading(false);
-  }
-};
-
+    };
     initApp();
   }, []);
 
   const notify = (message, type = "info", duration = 3000) => {
     setNotification({ message, type });
-    if (duration > 0) {
-      setTimeout(() => setNotification(null), duration);
-    }
+    if (duration > 0) setTimeout(() => setNotification(null), duration);
   };
 
   const logout = () => {
@@ -97,52 +81,42 @@ const initApp = async () => {
     localStorage.removeItem("user_email");
   };
 
-  const value = {
-    user,
-    setUser,
-    session,
-    setSession,
-    loading,
-    setLoading,
-    dataVersion,
-    setDataVersion,
-    adminToken,
-    setAdminToken,
-    notification,
-    notify,
-    logout,
-    apiFetch,
-    API_BASE,
-  };
-
   return (
-    <AppContext.Provider value={value}>
+    <AppContext.Provider value={{
+      user, setUser,
+      session, setSession,
+      loading, setLoading,
+      notification, notify,
+      logout, apiFetch, API_BASE,
+    }}>
       {children}
     </AppContext.Provider>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Logger Helper
-// ─────────────────────────────────────────────────────────────────────
-
-function logger(msg) {
-  const isDev = import.meta.env.DEV;
-  if (isDev) {
-    console.log(`[App] ${msg}`);
-  }
-}
-
-logger.warn = (msg) => console.warn(`[App] ⚠️  ${msg}`);
-logger.error = (msg) => console.error(`[App] ❌ ${msg}`);
-
-// ─────────────────────────────────────────────────────────────────────
-//  Admin Dot (accès discret au panel)
+//  AdminAccessDot — lit directement le localStorage, sans contexte user
 // ─────────────────────────────────────────────────────────────────────
 
 function AdminAccessDot() {
-  const { adminToken } = useApp();
-  const [showMenu, setShowMenu] = useState(false);
+  const [showMenu, setShowMenu]   = useState(false);
+  const [hasToken, setHasToken]   = useState(false);
+
+  // Vérifie le token admin depuis localStorage (indépendant du contexte user)
+  useEffect(() => {
+    const check = () => setHasToken(!!localStorage.getItem("admin_token"));
+    check();
+    // Écoute les changements de storage (connexion/déco admin dans un autre onglet)
+    window.addEventListener("storage", check);
+    return () => window.removeEventListener("storage", check);
+  }, []);
+
+  const handleAdminLogout = () => {
+    localStorage.removeItem("admin_token");
+    setHasToken(false);
+    setShowMenu(false);
+    window.location.href = "/";
+  };
 
   return (
     <div className="admin-dot">
@@ -156,23 +130,17 @@ function AdminAccessDot() {
 
       {showMenu && (
         <div className="admin-dot-menu">
-          {adminToken ? (
+          {hasToken ? (
             <>
-              <a href="/admin" className="admin-menu-link">
+              <a href="/admin" className="admin-menu-link" onClick={() => setShowMenu(false)}>
                 📋 Admin Panel
               </a>
-              <button
-                className="admin-menu-logout"
-                onClick={() => {
-                  localStorage.removeItem("admin_token");
-                  window.location.href = "/";
-                }}
-              >
-                🚪 Logout
+              <button className="admin-menu-logout" onClick={handleAdminLogout}>
+                🚪 Déco Admin
               </button>
             </>
           ) : (
-            <a href="/admin" className="admin-menu-link">
+            <a href="/admin" className="admin-menu-link" onClick={() => setShowMenu(false)}>
               🔐 Admin Login
             </a>
           )}
@@ -188,14 +156,13 @@ function AdminAccessDot() {
 
 function NotificationToast() {
   const { notification } = useApp();
-
   if (!notification) return null;
 
   const bgClass = {
     success: "toast-success",
-    error: "toast-error",
+    error:   "toast-error",
     warning: "toast-warning",
-    info: "toast-info",
+    info:    "toast-info",
   }[notification.type] || "toast-info";
 
   return (
@@ -206,7 +173,7 @@ function NotificationToast() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Main App Component
+//  AppContent — Layout principal
 // ─────────────────────────────────────────────────────────────────────
 
 function AppContent() {
@@ -215,7 +182,7 @@ function AppContent() {
   if (loading) {
     return (
       <div className="app-loading">
-        <div className="spinner"></div>
+        <div className="spinner" />
         <p>Chargement de Fantasy Boulzazen...</p>
       </div>
     );
@@ -239,10 +206,8 @@ function AppContent() {
             path="/predictions"
             element={user ? <Predictions /> : <Navigate to="/" replace />}
           />
-          <Route
-            path="/leaderboard"
-            element={<Leaderboard />}
-          />
+          <Route path="/leaderboard" element={<Leaderboard />} />
+          {/* Admin : route indépendante — AdminPanel gère son propre état */}
           <Route path="/admin" element={<AdminPanel />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
