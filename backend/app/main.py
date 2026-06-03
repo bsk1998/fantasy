@@ -89,14 +89,14 @@ try:
     ADMIN_AVAILABLE = True
 except ImportError as e:
     ADMIN_AVAILABLE = False
-    print(f"Admin routes non disponibles : {e}")
+    logger.error(f"❌ Erreur lors de l'import des routes admin ou de l'authentification admin : {e}")
 
 try:
     from app.updater import start_scheduler, get_matchs_actuels, tache_mise_a_jour_quotidienne
     UPDATER_AVAILABLE = True
 except ImportError as e:
     UPDATER_AVAILABLE = False
-    print(f"Updater non disponible : {e}")
+    logger.error(f"❌ Erreur lors de l'import de l'updater : {e}")
 
 try:
     from app.scraper import get_scraping_status
