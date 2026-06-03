@@ -16,6 +16,13 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("fantasy_api")
+logging.getLogger("admin_auth").setLevel(logging.INFO) # S'assurer que les logs INFO de admin_auth sont visibles
+
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -104,13 +111,6 @@ try:
 except ImportError as e:
     SCRAPER_AVAILABLE = False
     print(f"Scraper non disponible : {e}")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("fantasy_api")
-logging.getLogger("admin_auth").setLevel(logging.INFO) # S'assurer que les logs INFO de admin_auth sont visibles
 
 # ────────────────────────────────────────────────────────────────────────
 #  Configuration
