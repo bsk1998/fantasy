@@ -105,16 +105,16 @@ except ImportError as e:
     SCRAPER_AVAILABLE = False
     print(f"Scraper non disponible : {e}")
 
-# ────────────────────────────────────────────────────────────────────────
-#  Configuration
-# ────────────────────────────────────────────────────────────────────────
-
-logger = logging.getLogger("fantasy_api")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger("fantasy_api")
 logging.getLogger("admin_auth").setLevel(logging.INFO) # S'assurer que les logs INFO de admin_auth sont visibles
+
+# ────────────────────────────────────────────────────────────────────────
+#  Configuration
+# ────────────────────────────────────────────────────────────────────────
 
 API_BASE    = os.getenv("API_BASE", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
