@@ -153,14 +153,6 @@ async def parse_rules_endpoint(req: RulesParseRequest, admin: dict = Depends(ver
         "message": msg,
         "rules": parsed.get("rules", []),
     }
-    
-    token = generate_admin_token(req.username)
-    _log_action("login", "admin", target_id="admin")
-    
-    return AdminLoginResponse(
-        access_token=token,
-        message="✅ Connexion admin réussie"
-    )
 
 
 @router.get("/status")
