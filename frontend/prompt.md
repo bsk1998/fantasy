@@ -1,0 +1,5 @@
+agis comme le meilleur devloppeur au monde, tu me donne les fichiers complets pres à etre coller . 
+je veux : 
+- je veux que les compte inscrit pour jouer sont enregistrer dans supabase (j'ai déja un compt) et le compte avec email et mot de passe et pseudo sont enregistrer dans spabase et aussi là on enregistre les points et les equipes fantasy et les pronostiques et tout pour que ce soit facile de les enregistrer et de les lire pour groq et les contabiliter des point et les classemnts des utulisteurs. 
+- quand un utulisateur s'inscrit il est authomatiquement enregistrer dans la ligues generale sauvegarder aussi dans supabase . 
+- ajoute une option de recherche web pour groq en lui mettant moi meme un site et il rentre le lire et peux extraires les resultats et les performances pour que il peut calculer les points des joueurs authomatiquemet d'apres les regles que j'ai creer dans le jeux et les resultats reel que je lui envoie ou les recherches web que je donne . une fois le resultas aprouver ils sont enregistrer dans supabase qui ecrase le totele des points actuel.
