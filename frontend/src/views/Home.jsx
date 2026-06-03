@@ -3,6 +3,7 @@ import { useApp } from "../App";
 import Dashboard from "./Dashboard";
 
 const KNOWN_EMAILS_KEY = "known_user_emails";
+const API_TIMEOUT = 10000; // 10 secondes
 
 function readKnownEmails() {
   try {
@@ -25,7 +26,7 @@ function rememberKnownEmail(value) {
 export default function Home() {
   const { user, setUser, setSession, apiFetch } = useApp();
 
-  const [mode,     setMode]     = useState("login"); // "login" | "register"
+  const [mode,     setMode]     = useState("login");
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
@@ -40,7 +41,6 @@ export default function Home() {
     setKnownEmails(readKnownEmails());
   }, []);
 
-  // Si connecté → afficher le dashboard
   if (user) return <Dashboard />;
 
   const handleSubmit = async () => {
@@ -62,20 +62,31 @@ export default function Home() {
         ? { email, password }
         : { email, password, username };
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
+
       const res  = await apiFetch(endpoint, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
+        signal:  controller.signal,
       });
 
-      const data = await res.json();
+      clearTimeout(timeoutId);
 
-      if (!res.ok) {
-        setError(data.detail || "Erreur de connexion.");
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        setError("Réponse serveur invalide.");
         return;
       }
 
-      // Stocker le token si présent
+      if (!res.ok) {
+        setError(data.detail || data.message || "Erreur de connexion.");
+        return;
+      }
+
       if (data.access_token) {
         localStorage.setItem("auth_token", data.access_token);
         setSession({ access_token: data.access_token });
@@ -84,7 +95,12 @@ export default function Home() {
       setKnownEmails(rememberKnownEmail(email));
       setUser(data.user || data);
     } catch (err) {
-      setError("Impossible de joindre le serveur.");
+      if (err.name === "AbortError") {
+        setError("Timeout de connexion. Le serveur n'a pas répondu à temps.");
+      } else {
+        setError(`Erreur réseau: ${err.message || "Impossible de joindre le serveur."}`);
+        console.error("Auth error:", err);
+      }
     } finally {
       setBusy(false);
     }
@@ -100,7 +116,6 @@ export default function Home() {
       <div className="login-bg-grid" />
 
       <div className="login-content">
-        {/* Hero */}
         <div className="login-hero">
           <div className="login-trophy-wrap">
             <span className="login-trophy-emoji">🏆</span>
@@ -114,7 +129,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Toggle login / register */}
         <div className="auth-mode-toggle">
           <button
             className={`auth-mode-btn ${mode === "login" ? "active" : ""}`}
@@ -130,7 +144,6 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Carte formulaire */}
         <div className="login-card">
           {error && <div className="auth-alert error">{error}</div>}
           {info  && <div className="auth-alert success">{info}</div>}
@@ -144,6 +157,7 @@ export default function Home() {
                   placeholder="Ton pseudo dans la ligue"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  disabled={busy}
                 />
               </div>
             )}
@@ -156,6 +170,7 @@ export default function Home() {
                 placeholder="ton@email.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                disabled={busy}
               />
             </div>
 
@@ -168,12 +183,14 @@ export default function Home() {
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+                  onKeyDown={(e) => e.key === "Enter" && !busy && handleSubmit()}
+                  disabled={busy}
                 />
                 <button
                   className="auth-eye-btn"
                   type="button"
                   onClick={() => setShowPwd(!showPwd)}
+                  disabled={busy}
                 >
                   {showPwd ? "🙈" : "👁️"}
                 </button>
@@ -198,6 +215,7 @@ export default function Home() {
                 setKnownEmails(readKnownEmails());
                 setShowKnownEmails((value) => !value);
               }}
+              disabled={busy}
             >
               Emails sur cet appareil
             </button>
@@ -214,6 +232,7 @@ export default function Home() {
                         setEmail(item);
                         setShowKnownEmails(false);
                       }}
+                      disabled={busy}
                     >
                       {item}
                     </button>
@@ -225,7 +244,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* Mode invité */}
           <div className="auth-separator"><span>ou</span></div>
           <div className="guest-form">
             <p className="login-desc" style={{ fontSize: "0.75rem", marginBottom: 8 }}>
@@ -234,6 +252,7 @@ export default function Home() {
             <button
               className="auth-submit-btn guest-submit"
               onClick={handleGuest}
+              disabled={busy}
             >
               👀 Continuer en tant qu'invité
             </button>

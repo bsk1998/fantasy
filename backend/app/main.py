@@ -21,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("fantasy_api")
-logging.getLogger("admin_auth").setLevel(logging.INFO) # S'assurer que les logs INFO de admin_auth sont visibles
+logging.getLogger("admin_auth").setLevel(logging.INFO)
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,16 +44,25 @@ class SimpleJWT:
 
     @staticmethod
     def decode(token: str, secret: str, algorithms=None) -> dict:
-        header_b64, payload_b64, signature_b64 = token.split(".")
-        signing_input = f"{header_b64}.{payload_b64}"
-        expected = hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(SimpleJWT._b64url(expected), signature_b64):
-            raise ValueError("Invalid token signature")
-        payload = json.loads(SimpleJWT._b64url_decode(payload_b64))
-        exp = payload.get("exp")
-        if exp is not None and int(exp) < int(datetime.utcnow().timestamp()):
-            raise ValueError("Expired token")
-        return payload
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                raise ValueError("Invalid token format")
+            header_b64, payload_b64, signature_b64 = parts
+            signing_input = f"{header_b64}.{payload_b64}"
+            expected = hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+            if not hmac.compare_digest(SimpleJWT._b64url(expected), signature_b64):
+                raise ValueError("Invalid token signature")
+            payload = json.loads(SimpleJWT._b64url_decode(payload_b64))
+            exp = payload.get("exp")
+            if exp is not None:
+                if isinstance(exp, str):
+                    exp = int(exp)
+                if int(exp) < int(datetime.utcnow().timestamp()):
+                    raise ValueError("Expired token")
+            return payload
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Token decode error: {e}")
 
     @staticmethod
     def _b64url(data: bytes) -> str:
@@ -67,21 +76,21 @@ class SimpleJWT:
 
 pyjwt = SimpleJWT
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────���───────────────────────────
 #  Imports internes
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 try:
     from app.database import SessionLocal, engine
     from app.models import (
         Base, User, TeamNation, Player, Coach, MatchResult, PredictionScore,
-        PredictionTableau, PredictionAnnexes, FantasyRoster, League, GroupStanding, SyncLog, Complaint, # Added Complaint
+        PredictionTableau, PredictionAnnexes, FantasyRoster, League, GroupStanding, SyncLog, Complaint,
     )
     from app.simulation_data import (
         build_fallback_coaches, build_fallback_matches, build_fallback_players,
         build_fallback_teams,
     )
-    from app.admin_models import AdminTournamentConfig # Import AdminTournamentConfig for bracket/annexes lock
+    from app.admin_models import AdminTournamentConfig
     from app import admin_models  # noqa: F401 - registers admin tables on Base.metadata
     DB_AVAILABLE = True
     MODELS_AVAILABLE = True
@@ -112,9 +121,9 @@ except ImportError as e:
     SCRAPER_AVAILABLE = False
     print(f"Scraper non disponible : {e}")
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  Configuration
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 API_BASE    = os.getenv("API_BASE", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
@@ -123,9 +132,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 security = HTTPBearer(auto_error=False)
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  Événements Lifespan
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,7 +143,7 @@ async def lifespan(app: FastAPI):
     if DB_AVAILABLE and MODELS_AVAILABLE:
         try:
             Base.metadata.create_all(bind=engine)
-            logger.info("✅ Base de données initialisée via SQLAlchemy Base.metadata.create_all")
+            logger.info("✅ Base de données initialisée")
         except Exception as e:
             logger.error(f"❌ DB init erreur : {e}")
 
@@ -173,9 +182,9 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Arrêt de l'application...")
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  Helpers
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 async def _verifier_groq() -> bool:
     groq_key = os.getenv("GROQ_API_KEY", "")
@@ -209,8 +218,11 @@ async def _scraping_initial():
 
 def _decode_token(token: str) -> Optional[dict]:
     try:
-        return pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except Exception:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        logger.debug(f"✅ Token décodé avec succès")
+        return payload
+    except Exception as e:
+        logger.warning(f"❌ Token decode erreur : {e}")
         return None
 
 
@@ -247,9 +259,9 @@ def _create_user_token(user: "User") -> str:
     )
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  Initialisation FastAPI
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Fantasy Boulzazen WC 2026",
@@ -260,7 +272,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        FRONTEND_URL,
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else []
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -272,14 +291,18 @@ if ADMIN_AVAILABLE:
     logger.info("✅ Admin routes incluses avec préfixe /api/admin")
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  ROUTES AUTH
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/register")
 async def register(request: Request):
     """Inscription email / password / username."""
-    data     = await request.json()
+    try:
+        data     = await request.json()
+    except Exception as e:
+        raise HTTPException(400, f"Invalid JSON: {e}")
+    
     email    = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "").strip()
     username = (data.get("username") or "").strip()
@@ -313,6 +336,7 @@ async def register(request: Request):
         db.refresh(user)
 
         token = _create_user_token(user)
+        logger.info(f"✅ Nouvel utilisateur inscrit : {email}")
         return {
             "access_token": token,
             "user": {
@@ -324,6 +348,11 @@ async def register(request: Request):
                 "score_predictor_scores": 0,
             },
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Register erreur : {e}")
+        raise HTTPException(500, "Erreur lors de l'inscription")
     finally:
         db.close()
 
@@ -331,7 +360,11 @@ async def register(request: Request):
 @app.post("/api/auth/login")
 async def login(request: Request):
     """Connexion email / password."""
-    data     = await request.json()
+    try:
+        data     = await request.json()
+    except Exception as e:
+        raise HTTPException(400, f"Invalid JSON: {e}")
+    
     email    = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "").strip()
 
@@ -345,6 +378,7 @@ async def login(request: Request):
     try:
         user = db.query(User).filter(User.email == email).first()
         if not user or not _verify_password(password, user.hashed_password):
+            logger.warning(f"⚠️ Tentative de connexion échouée : {email}")
             raise HTTPException(401, "Email ou mot de passe incorrect")
 
         if not user.hashed_password.startswith("pbkdf2_sha256$"):
@@ -358,6 +392,7 @@ async def login(request: Request):
             + (user.score_predictor_tableaux or 0)
             + (user.score_top_individuel or 0)
         )
+        logger.info(f"✅ Connexion réussie : {email}")
         return {
             "access_token": token,
             "user": {
@@ -371,6 +406,11 @@ async def login(request: Request):
                 "score_top_individuel":    user.score_top_individuel or 0,
             },
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Login erreur : {e}")
+        raise HTTPException(500, "Erreur lors de la connexion")
     finally:
         db.close()
 
@@ -415,9 +455,9 @@ async def get_me(credentials: HTTPAuthorizationCredentials = Depends(security)):
         db.close()
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  ROUTES DONNÉES PUBLIQUES
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @app.get("/api/matches")
 async def get_matches():
@@ -599,9 +639,9 @@ async def get_leaderboard():
             db.close()
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  ROUTES PRÉDICTIONS
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @app.get("/api/predictions/score")
 async def get_user_prediction_scores(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -657,12 +697,11 @@ async def save_prediction_score(
 
     db = SessionLocal()
     try:
-        user_id = payload.get("user_id") # Use user_id from token
+        user_id = payload.get("user_id")
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
 
-        # Check if match is locked (using MatchResult model)
         match_info = db.query(MatchResult).filter(MatchResult.sofascore_id == match_id).first()
         if match_info and match_info.is_locked:
             raise HTTPException(423, "Ce match est verrouillé et les pronostics sont fermés.")
@@ -673,7 +712,6 @@ async def save_prediction_score(
         ).first()
 
         if existing:
-            # Redundant check but good for safety if match_info isn't found
             if existing.is_locked:
                 raise HTTPException(423, "Ce pronostic est verrouillé")
             existing.predicted_home_score = int(predicted_home)
@@ -685,7 +723,7 @@ async def save_prediction_score(
                 predicted_home_score=int(predicted_home),
                 predicted_away_score=int(predicted_away),
                 points_earned=0,
-                is_locked=False, # Initial prediction is not locked, will be locked by scraper
+                is_locked=False,
             )
             db.add(pred)
 
@@ -734,13 +772,11 @@ async def save_bracket(
 
     db = SessionLocal()
     try:
-        user_id = payload.get("user_id") # Use user_id from token
+        user_id = payload.get("user_id")
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
 
-        # Check if tournament is locked (e.g., via AdminTournamentConfig.is_locked or a specific match lock)
-        # For bracket, it's usually locked before the first match starts.
         tournament_config = db.query(AdminTournamentConfig).first()
         if tournament_config and tournament_config.start_date:
             try:
@@ -749,7 +785,6 @@ async def save_bracket(
                     raise HTTPException(423, "Le tableau est verrouillé après le début du tournoi.")
             except ValueError:
                 logger.warning(f"Invalid start_date format in AdminTournamentConfig: {tournament_config.start_date}")
-
 
         existing = db.query(PredictionTableau).filter(PredictionTableau.user_id == user.id).first()
         bracket_data = data.get("bracket_data") or data
@@ -802,12 +837,11 @@ async def save_annexes(
 
     db = SessionLocal()
     try:
-        user_id = payload.get("user_id") # Use user_id from token
+        user_id = payload.get("user_id")
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
 
-        # Annexes are typically locked before the tournament starts, similar to bracket
         tournament_config = db.query(AdminTournamentConfig).first()
         if tournament_config and tournament_config.start_date:
             try:
@@ -829,9 +863,9 @@ async def save_annexes(
         db.close()
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  ROUTES FANTASY ROSTER
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @app.get("/api/fantasy/roster")
 async def get_user_roster(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -866,7 +900,6 @@ async def get_user_roster(credentials: HTTPAuthorizationCredentials = Depends(se
                 "remaining_budget": 100.0,
             }, status_code=200)
         
-        # Hydrate player and coach data for the frontend
         players_in_roster = [
             {
                 "id": p.id,
@@ -916,7 +949,7 @@ async def save_roster(
 
     db = SessionLocal()
     try:
-        user_id = payload.get("user_id") # Use user_id from token
+        user_id = payload.get("user_id")
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, "Utilisateur introuvable")
@@ -927,15 +960,13 @@ async def save_roster(
         players = db.query(Player).filter(Player.id.in_(player_ids)).all() if player_ids else []
         coach = db.query(Coach).filter(Coach.id == coach_id).first() if coach_id else None
         
-        # Re-calculate remaining budget on backend to prevent client-side tampering
         total_player_cost = sum(p.price for p in players)
         total_coach_cost = coach.price if coach else 0.0
-        calculated_remaining_budget = 100.0 - total_player_cost - total_coach_cost # Max budget is 100M
+        calculated_remaining_budget = 100.0 - total_player_cost - total_coach_cost
 
         if calculated_remaining_budget < 0:
             raise HTTPException(400, "Budget dépassé : Le coût de l'équipe est supérieur à 100M€.")
             
-        # Validate roster constraints (3 players per nation, coach nationality conflict)
         player_nationalities = {}
         for player in players:
             player_nationalities[player.nationality] = player_nationalities.get(player.nationality, 0) + 1
@@ -947,18 +978,17 @@ async def save_roster(
         if coach and coach.nationality in player_nationalities:
             raise HTTPException(400, f"Conflit de nationalité : L'entraîneur ({coach.nationality}) ne peut pas avoir de joueurs de sa nation.")
 
-
         roster = db.query(FantasyRoster).filter(FantasyRoster.user_id == user.id).first()
         if not roster:
             roster = FantasyRoster(user_id=user.id)
             db.add(roster)
         roster.current_formation = data.get("formation") or "4-3-3"
-        roster.remaining_budget = calculated_remaining_budget # Use calculated budget
+        roster.remaining_budget = calculated_remaining_budget
         roster.players = players
         if coach:
             roster.coach_id = coach.id
         else:
-            roster.coach_id = None # Clear coach if none selected
+            roster.coach_id = None
 
         db.commit()
         return {"status": "ok", "message": "Équipe sauvegardée", "remaining_budget": calculated_remaining_budget}
@@ -966,9 +996,9 @@ async def save_roster(
         db.close()
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 #  ROUTES STATUS / HEALTH
-# ────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 
 @app.get("/api/scraping/status")
 async def scraping_status():
@@ -1065,7 +1095,7 @@ async def api_info():
             "admin_panel":          ADMIN_AVAILABLE,
             "groq_integration":     bool(GROQ_API_KEY),
             "automatic_scraping":   UPDATER_AVAILABLE,
-            "complaint_system":     True, # New: Complaint system
+            "complaint_system":     True,
         },
     }
 

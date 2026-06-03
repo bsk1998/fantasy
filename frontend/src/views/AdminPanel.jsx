@@ -1,54 +1,73 @@
 import React, { useState } from "react";
 import "./AdminPanel.css";
 
+const API_TIMEOUT = 10000;
+
 export default function AdminPanel() {
   const [token, setToken] = useState(localStorage.getItem("admin_token") || "");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [activeTab, setActiveTab] = useState("squad");
+  const [loginBusy, setLoginBusy] = useState(false);
 
-  // Squad Management
   const [squadNation, setSquadNation] = useState("");
   const [squaddrawText, setSquadRawText] = useState("");
   const [parsedSquad, setParsedSquad] = useState(null);
   const [pricing, setPricing] = useState(null);
 
-  // Tournament Management
   const [tournamentText, setTournamentText] = useState("");
 
   const API_BASE = import.meta.env.VITE_API_BASE || "";
 
-  // ════════════════════════════════════════════════════════════════════
-  //  LOGIN
-  // ════════════════════════════════════════════════════════════════════
-
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError("");
+    setLoginBusy(true);
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
+
       const res = await fetch(`${API_BASE}/api/admin/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        console.error("Invalid JSON response:", e);
+        setLoginError("Réponse serveur invalide.");
+        setLoginBusy(false);
+        return;
+      }
+
       if (res.ok) {
-        const data = await res.json();
-        console.log("Admin login successful:", data); // Log succès
+        console.log("✅ Admin login successful:", data);
         setToken(data.access_token);
         localStorage.setItem("admin_token", data.access_token);
         setUsername("");
         setPassword("");
       } else {
-        const err = await res.json();
-        console.error("Admin login failed:", res.status, err); // Log échec avec statut et erreur
-        setLoginError(err.detail || "Connexion échouée");
+        console.error("❌ Admin login failed:", res.status, data);
+        setLoginError(data.detail || data.message || "Connexion échouée");
       }
     } catch (err) {
-      console.error("Admin login network error:", err); // Log erreurs réseau
-      setLoginError(err.message);
+      if (err.name === "AbortError") {
+        console.error("❌ Admin login timeout");
+        setLoginError("Timeout: Le serveur n'a pas répondu à temps.");
+      } else {
+        console.error("❌ Admin login network error:", err);
+        setLoginError(`Erreur réseau: ${err.message || "Impossible de joindre le serveur."}`);
+      }
+    } finally {
+      setLoginBusy(false);
     }
   };
 
@@ -68,6 +87,7 @@ export default function AdminPanel() {
               placeholder="Pseudo"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              disabled={loginBusy}
               required
             />
             <input
@@ -75,19 +95,18 @@ export default function AdminPanel() {
               placeholder="Mot de passe"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={loginBusy}
               required
             />
-            <button type="submit">Connexion</button>
-            {loginError && <p className="error">{loginError}</p>}
+            <button type="submit" disabled={loginBusy}>
+              {loginBusy ? "Connexion en cours..." : "Connexion"}
+            </button>
+            {loginError && <p className="error">⚠️ {loginError}</p>}
           </form>
         </div>
       </div>
     );
   }
-
-  // ════════════════════════════════════════════════════════════════════
-  //  SQUAD PARSING
-  // ════════════════════════════════════════════════════════════════════
 
   const handleParseSquad = async () => {
     try {
@@ -106,7 +125,6 @@ export default function AdminPanel() {
       const data = await res.json();
       if (data.status === "success") {
         setParsedSquad(data.parsed_data);
-        // Estimer les prix
         const pricingRes = await fetch(
           `${API_BASE}/api/admin/squad/estimate-prices`,
           {
@@ -129,10 +147,6 @@ export default function AdminPanel() {
       alert(`Erreur : ${err.message}`);
     }
   };
-
-  // ════════════════════════════════════════════════════════════════════
-  //  ADMIN INTERFACE
-  // ════════════════════════════════════════════════════════════════════
 
   return (
     <div className="admin-container">
@@ -164,7 +178,6 @@ export default function AdminPanel() {
         </button>
       </div>
 
-      {/* EFFECTIFS TAB */}
       {activeTab === "squad" && (
         <div className="admin-section">
           <h2>📋 Gestion des Effectifs</h2>
@@ -217,7 +230,6 @@ export default function AdminPanel() {
         </div>
       )}
 
-      {/* TOURNAMENT TAB */}
       {activeTab === "tournament" && (
         <div className="admin-section">
           <h2>🏆 Gestion du Tournoi</h2>
@@ -236,7 +248,6 @@ export default function AdminPanel() {
         </div>
       )}
 
-      {/* RULES TAB */}
       {activeTab === "rules" && (
         <div className="admin-section">
           <h2>📏 Barème Fantasy</h2>
