@@ -1051,10 +1051,61 @@ function RulesSection() {
   const deleteRule = (id)=>setRules(prev=>({...prev,[activeMode]:prev[activeMode].filter(r=>r.id!==id)}));
   const saveRules = async()=>{
     setBusy(true);
-    localStorage.setItem("admin_custom_rules",JSON.stringify(rules));
-    try{await adminFetch("/rules/update",{method:"POST",body:JSON.stringify({rule_name:"full_ruleset",description:"Barème complet",points_value:0,is_active:true,position_affected:"ALL"})});}catch(e){}
-    showFb("ok","✅ Règles sauvegardées.");
-    setBusy(false);
+    showFb("info","💾 Sauvegarde des règles...",0);
+    try{
+      const currentRules = rules[activeMode];
+      for (const rule of currentRules) {
+        // Construction de la requête selon le mode de jeu
+        let ruleData;
+        if (activeMode === "fantasy") {
+          ruleData = {
+            rule_name:       `${activeMode}_${rule.id}`,
+            description:     rule.label,
+            position_affected: "ALL", // Ou spécifique si la logique le permet
+            points_value:    0, // Points par position sont gérés dans la description/label
+            is_active:       true,
+            // Pour Fantasy, les points par position sont dans la description.
+            // On peut les formater comme un JSON string dans la description ou ajouter des champs au modèle.
+            // Pour l'instant, on met 0 et on laisse la description porter l'info.
+            // Il faudrait peut-être ajouter une API plus flexible pour les règles complexes.
+            // Pour cette implémentation, la description inclura les points par position.
+            description: `${rule.label} (G:${rule.G}, D:${rule.D}, M:${rule.M}, A:${rule.A})`,
+          };
+        } else if (activeMode === "coach") {
+          ruleData = {
+            rule_name:       `${activeMode}_${rule.id}`,
+            description:     rule.label + (rule.note ? ` (${rule.note})` : ""),
+            position_affected: null,
+            points_value:    rule.pts,
+            is_active:       true,
+          };
+        } else { // pronos, bracket, annexes
+          ruleData = {
+            rule_name:       `${activeMode}_${rule.id}`,
+            description:     rule.label,
+            position_affected: null,
+            points_value:    rule.pts,
+            is_active:       true,
+          };
+        }
+
+        // Appel au backend pour chaque règle
+        const res = await adminFetch("/rules/update", {
+          method: "POST",
+          body: JSON.stringify(ruleData),
+        });
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.message || `Erreur lors de la sauvegarde de la règle ${rule.label}`);
+        }
+      }
+      localStorage.setItem("admin_custom_rules",JSON.stringify(rules)); // Toujours sauvegarder localement
+      showFb("ok","✅ Règles sauvegardées.");
+    }catch(e){
+      showFb("err","❌ Erreur de sauvegarde des règles : "+e.message);
+    }finally{
+      setBusy(false);
+    }
   };
 
   return (
@@ -1220,7 +1271,7 @@ function AdminDashboard({ onLogout }) {
         {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
         {activeTab==="tournament"     && <TournamentSection/>}
         {activeTab==="rules"          && <RulesSection/>}
-        {activeTab==="tools"          && <ToolsSection groqKey={groqKey}/>}
+        {activeTab==="tools"          && <ToolsSection/>}
       </main>
     </div>
   );
