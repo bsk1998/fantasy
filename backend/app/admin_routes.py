@@ -169,7 +169,6 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
         username = user.username or user.email
         _log_action("user_deleted", "user", target_id=str(user_id), details=username)
 
-        # Supprimer les données liées via ORM (cascade ou suppression manuelle)
         from sqlalchemy import text as sql_text
 
         db.execute(sql_text("DELETE FROM prediction_scores WHERE user_id = :uid"),    {"uid": user_id})
@@ -205,11 +204,10 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
     """
     db = SessionLocal()
     try:
-        # Chercher une ligue générale existante
         league = db.query(League).filter(League.name == "Ligue Générale Boulzazen").first()
 
         if not league:
-            invite_code = secrets.token_hex(4).upper()  # code unique 8 cars
+            invite_code = secrets.token_hex(4).upper()
             league = League(
                 name="Ligue Générale Boulzazen",
                 invite_code=invite_code,
@@ -220,7 +218,6 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
             db.add(league)
             db.flush()
 
-        # Ajouter tous les utilisateurs non encore membres
         all_users = db.query(User).all()
         already_member_ids = {u.id for u in league.members}
         added = 0
@@ -253,12 +250,7 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
 @router.get("/leagues/general")
 async def get_general_league_ranking(admin: dict = Depends(verify_admin)):
     """
-    Retourne le classement de la Ligue Générale :
-    - Classement global (total tous modes)
-    - Classement Fantasy
-    - Classement Pronostics Scores
-    - Classement Tableau Tournoi
-    - Classement Prédictions Annexes
+    Retourne le classement de la Ligue Générale.
     """
     db = SessionLocal()
     try:
@@ -405,26 +397,6 @@ async def inject_squad(
         return {"status": "success", "message": msg, "nation": nation}
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, str(e))
-    finally:
-        db.close()
-
-
-@router.get("/squad/filled-nations")
-async def get_filled_nations(admin: dict = Depends(verify_admin)):
-    """Retourne la liste des nations dont l'effectif (joueurs + entraîneur) est complet."""
-    db = SessionLocal()
-    try:
-        filled_nations_list = []
-        nations = db.query(TeamNation).all()
-        for nation in nations:
-            has_players = db.query(Player).filter(Player.nationality == nation.name, Player.is_confirmed == True).first()
-            has_coach = db.query(Coach).filter(Coach.nationality == nation.name, Coach.is_confirmed == True).first()
-            if has_players and has_coach:
-                filled_nations_list.append(nation.name)
-        return {"status": "success", "filled_nations": filled_nations_list}
-    except Exception as e:
-        logger.error(f"get_filled_nations error: {e}")
         raise HTTPException(500, str(e))
     finally:
         db.close()

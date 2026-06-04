@@ -7,3 +7,7 @@ Dans SquadsSection, l'appel à https://api.anthropic.com/v1/messages est remplac
 Problème 2 — Design du bouton de sélection avec couleur si effectif complet :
 Il faut ajouter un indicateur visuel sur chaque nation chip selon si elle a un effectif complet (joueurs + entraîneur).
 Les nation-chip affichent un indicateur vert (✅ + bordure verte) si la nation a un effectif complet (joueurs + entraîneur) via un état filledNations chargé depuis le backend.
+
+
+
+il reste à : corriger : admin_routes.py a une fonction get_filled_nations en double, ce qui fera crasher FastAPI au démarrage.
