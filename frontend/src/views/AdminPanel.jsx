@@ -698,38 +698,15 @@ function SquadsSection({ groqKey }) {
   const loadFilledNations = useCallback(async () => {
     setLoadingFilled(true);
     try {
-      // On appelle /api/players pour savoir quelles nationalités sont présentes
-      // et /api/coaches pour les entraîneurs confirmés
-      const [resPlayers, resCoaches] = await Promise.all([
-        fetch(`${API_BASE}/api/players`),
-        fetch(`${API_BASE}/api/coaches`),
-      ]);
-      const playersData = resPlayers.ok ? await resPlayers.json() : [];
-      const coachesData = resCoaches.ok ? await resCoaches.json() : [];
-
-      const playersList = Array.isArray(playersData) ? playersData : (playersData.data || []);
-      const coachesList = Array.isArray(coachesData) ? coachesData : (coachesData.data || []);
-
-      // Compte les joueurs par nation
-      const playerCountByNation = {};
-      for (const p of playersList) {
-        const nat = (p.nationality || "").trim();
-        if (nat) playerCountByNation[nat] = (playerCountByNation[nat] || 0) + 1;
+      const res = await adminFetch("/squad/filled-nations");
+      const data = await res.json();
+      if (res.ok && data.status === "success") {
+        setFilledNations(new Set(data.filled_nations || []));
+      } else {
+        console.error("Erreur lors de la récupération des nations complètes :", data.message);
       }
-
-      // Nations qui ont un entraîneur confirmé
-      const coachNations = new Set(coachesList.map(c => (c.nationality || c.team_name || "").trim()).filter(Boolean));
-
-      // Une nation est "filled" si elle a ≥ 15 joueurs ET un entraîneur
-      const filled = new Set();
-      for (const [nation, count] of Object.entries(playerCountByNation)) {
-        if (count >= 15 && coachNations.has(nation)) {
-          filled.add(nation);
-        }
-      }
-      setFilledNations(filled);
     } catch (e) {
-      console.warn("loadFilledNations:", e.message);
+      console.error("Erreur API lors de la récupération des nations complètes :", e);
     } finally {
       setLoadingFilled(false);
     }
