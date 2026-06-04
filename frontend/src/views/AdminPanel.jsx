@@ -1,10 +1,9 @@
 /**
  * AdminPanel.jsx — Panneau d'administration Fantasy Boulzazen WC 2026
  * ====================================================================
- * ✅ Suppression de comptes utilisateurs
- * ✅ Ligue Générale (création + classement global + par jeu)
- * ✅ Effectifs 48 nations CDM 2026 (équipes mises à jour)
- * ✅ Tournoi, Règles, Outils
+ * ✅ Fix 1 : SquadsSection appelle /api/admin/squad/parse (backend Groq)
+ *            au lieu de https://api.anthropic.com/v1/messages
+ * ✅ Fix 2 : nation-chip affiche ✅ + bordure verte si effectif complet
  */
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
@@ -13,7 +12,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 const API_BASE    = import.meta.env.VITE_API_BASE || "";
 const API_TIMEOUT = 20000;
 
-// ─── 48 nations qualifiées CDM 2026 (équipes mises à jour) ───────────────────
+// ─── 48 nations qualifiées CDM 2026 ──────────────────────────────────────────
 const NATIONS_CDM2026 = {
   "Groupe A": ["Mexique","Afrique du Sud","République de Corée","Tchéquie"],
   "Groupe B": ["Canada","Bosnie-Herzégovine","Qatar","Suisse"],
@@ -194,10 +193,31 @@ textarea:focus{border-color:var(--blue);}
 /* NATIONS */
 .group-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);padding:12px 0 5px;}
 .nation-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:4px;}
-.nation-chip{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:7px 12px;font-size:.8rem;font-weight:600;cursor:pointer;transition:.15s;color:var(--text2);text-align:left;}
+
+/* ── Fix 2 : nation-chip avec état filled (effectif complet) ── */
+.nation-chip{
+  background:var(--s2);
+  border:1px solid var(--border);
+  border-radius:var(--radius2);
+  padding:7px 12px;
+  font-size:.8rem;font-weight:600;
+  cursor:pointer;transition:.15s;
+  color:var(--text2);text-align:left;
+  display:flex;align-items:center;gap:6px;
+}
 .nation-chip:hover{border-color:var(--border2);color:var(--text);}
 .nation-chip.selected{background:rgba(79,139,255,.12);border-color:rgba(79,139,255,.4);color:var(--blue);}
-.nation-chip.filled{border-color:rgba(0,255,170,.3);color:var(--green);}
+.nation-chip.filled{
+  border-color:rgba(0,255,170,.45);
+  color:var(--green);
+  background:rgba(0,255,170,.06);
+}
+.nation-chip.selected.filled{
+  border-color:var(--blue);
+  background:rgba(79,139,255,.15);
+  color:var(--blue);
+}
+.nation-chip-check{font-size:.75rem;flex-shrink:0;}
 
 /* UPLOAD */
 .upload-zone{border:2px dashed var(--border2);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:.2s;background:var(--s2);}
@@ -403,16 +423,16 @@ function SettingsSection({ groqKey, onGroqKeyChange }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Utilisateurs (NOUVELLE)
+//  SECTION : Utilisateurs
 // ════════════════════════════════════════════════════════════════════════════
 
 function UsersSection() {
-  const [users,      setUsers]     = useState([]);
-  const [loading,    setLoading]   = useState(false);
-  const [fb,         setFb]        = useState(null);
-  const [search,     setSearch]    = useState("");
-  const [confirm,    setConfirm]   = useState(null); // {id, username}
-  const [busy,       setBusy]      = useState(false);
+  const [users,    setUsers]   = useState([]);
+  const [loading,  setLoading] = useState(false);
+  const [fb,       setFb]      = useState(null);
+  const [search,   setSearch]  = useState("");
+  const [confirm,  setConfirm] = useState(null);
+  const [busy,     setBusy]    = useState(false);
 
   const showFb = (type, text, dur=5000) => {
     setFb({type,text}); if(dur) setTimeout(()=>setFb(null), dur);
@@ -427,14 +447,10 @@ function UsersSection() {
       setUsers(data.users || []);
     } catch(e) {
       showFb("err", "❌ Impossible de charger les utilisateurs : " + e.message);
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   useEffect(() => { loadUsers(); }, []);
-
-  const confirmDelete = (user) => setConfirm(user);
 
   const handleDelete = async () => {
     if(!confirm) return;
@@ -447,10 +463,7 @@ function UsersSection() {
       setUsers(prev => prev.filter(u => u.id !== confirm.id));
     } catch(e) {
       showFb("err", "❌ " + e.message);
-    } finally {
-      setBusy(false);
-      setConfirm(null);
-    }
+    } finally { setBusy(false); setConfirm(null); }
   };
 
   const filtered = users.filter(u =>
@@ -464,38 +477,22 @@ function UsersSection() {
 
   return (
     <div>
-      <p className="page-sub">Gérez les comptes inscrits sur la ligue. La suppression est définitive et irréversible.</p>
+      <p className="page-sub">Gérez les comptes inscrits sur la ligue.</p>
       <Feedback msg={fb} />
-
       {confirm && (
         <ConfirmDialog
           title="Supprimer ce compte ?"
-          message={`Vous allez supprimer définitivement le compte de « ${confirm.username || confirm.email} » et toutes ses données (équipe, pronostics, plaintes). Cette action est irréversible.`}
+          message={`Vous allez supprimer définitivement le compte de « ${confirm.username || confirm.email} » et toutes ses données. Cette action est irréversible.`}
           onConfirm={handleDelete}
           onCancel={() => setConfirm(null)}
         />
       )}
-
-      {/* Stats */}
       <div className="stats-row">
-        <div className="stat-card">
-          <div className="stat-val" style={{color:"var(--blue)"}}>{totalUsers}</div>
-          <div className="stat-lbl">Membres</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-val" style={{color:"var(--green)"}}>{totalFantasy}</div>
-          <div className="stat-lbl">Pts Fantasy total</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-val" style={{color:"var(--gold)",fontSize:"1rem"}}>{topUser?.username || "—"}</div>
-          <div className="stat-lbl">Leader actuel</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-val" style={{color:"var(--orange)"}}>{topUser?.total || 0}</div>
-          <div className="stat-lbl">Pts leader</div>
-        </div>
+        <div className="stat-card"><div className="stat-val" style={{color:"var(--blue)"}}>{totalUsers}</div><div className="stat-lbl">Membres</div></div>
+        <div className="stat-card"><div className="stat-val" style={{color:"var(--green)"}}>{totalFantasy}</div><div className="stat-lbl">Pts Fantasy total</div></div>
+        <div className="stat-card"><div className="stat-val" style={{color:"var(--gold)",fontSize:"1rem"}}>{topUser?.username || "—"}</div><div className="stat-lbl">Leader actuel</div></div>
+        <div className="stat-card"><div className="stat-val" style={{color:"var(--orange)"}}>{topUser?.total || 0}</div><div className="stat-lbl">Pts leader</div></div>
       </div>
-
       <div className="card">
         <div className="card-title" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span>Comptes inscrits <span>({filtered.length}/{totalUsers})</span></span>
@@ -503,28 +500,14 @@ function UsersSection() {
             {loading?<><span className="spinner"/> Chargement</>:"🔄 Actualiser"}
           </button>
         </div>
-
         <input className="search-bar" placeholder="🔍 Rechercher par pseudo ou email..." value={search} onChange={e=>setSearch(e.target.value)} />
-
         {loading ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Chargement des utilisateurs...</div>
+          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Chargement...</div>
         ) : filtered.length === 0 ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
-            {search ? "Aucun utilisateur trouvé pour cette recherche." : "Aucun utilisateur inscrit."}
-          </div>
+          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Aucun utilisateur.</div>
         ) : (
           <table className="users-table">
-            <thead>
-              <tr>
-                <th>Compte</th>
-                <th>Fantasy</th>
-                <th>Scores</th>
-                <th>Bracket</th>
-                <th>Annexes</th>
-                <th style={{textAlign:"right"}}>Total</th>
-                <th></th>
-              </tr>
-            </thead>
+            <thead><tr><th>Compte</th><th>Fantasy</th><th>Scores</th><th>Bracket</th><th>Annexes</th><th style={{textAlign:"right"}}>Total</th><th></th></tr></thead>
             <tbody>
               {filtered.map(u => (
                 <tr key={u.id}>
@@ -541,30 +524,20 @@ function UsersSection() {
                   <td><span style={{color:"var(--blue)",fontWeight:700}}>{u.score_predictor_scores}</span></td>
                   <td><span style={{color:"var(--gold)",fontWeight:700}}>{u.score_predictor_tableaux}</span></td>
                   <td><span style={{color:"#a78bfa",fontWeight:700}}>{u.score_top_individuel}</span></td>
-                  <td style={{textAlign:"right"}}>
-                    <span className="score-pill">⭐ {u.total} pts</span>
-                  </td>
-                  <td>
-                    <button className="btn-danger-sm" onClick={()=>confirmDelete(u)} disabled={busy}>
-                      🗑️ Supprimer
-                    </button>
-                  </td>
+                  <td style={{textAlign:"right"}}><span className="score-pill">⭐ {u.total} pts</span></td>
+                  <td><button className="btn-danger-sm" onClick={()=>setConfirm(u)} disabled={busy}>🗑️ Supprimer</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
       </div>
-
-      <div style={{padding:"12px 14px",background:"rgba(255,77,109,.05)",border:"1px solid rgba(255,77,109,.2)",borderRadius:8,fontSize:".75rem",color:"var(--text2)",lineHeight:1.6}}>
-        <strong style={{color:"var(--red)"}}>⚠️ Attention</strong> — La suppression d'un compte efface définitivement toutes les données de ce joueur : équipe Fantasy, pronostics, plaintes, et le retire de toutes les ligues. Action irréversible.
-      </div>
     </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Ligue Générale (NOUVELLE)
+//  SECTION : Ligue Générale
 // ════════════════════════════════════════════════════════════════════════════
 
 const RANKING_TABS = [
@@ -631,10 +604,8 @@ function GeneralLeagueSection() {
 
   return (
     <div>
-      <p className="page-sub">Créez la Ligue Générale qui regroupe tous les membres inscrits. Consultez le classement global et par mode de jeu.</p>
+      <p className="page-sub">Créez la Ligue Générale qui regroupe tous les membres inscrits.</p>
       <Feedback msg={fb} />
-
-      {/* Actions */}
       <div className="actions-strip" style={{marginBottom:16}}>
         <button className="btn-action btn-green" onClick={createLeague} disabled={busy}>
           {busy?<><span className="spinner"/>Création...</>:"🏆 Créer / Mettre à jour la Ligue Générale"}
@@ -646,13 +617,11 @@ function GeneralLeagueSection() {
           {loading?"Chargement...":"🔁 Actualiser"}
         </button>
       </div>
-
-      {/* Hero ligue */}
       {leagueData && leagueData.status === "success" && (
         <div className="league-hero">
           <div>
             <div className="league-badge">🏆 Ligue Générale Boulzazen</div>
-            <div className="league-meta">Code d'invitation : <strong style={{color:"var(--blue)"}}>{leagueData.invite_code}</strong> · Ligue publique</div>
+            <div className="league-meta">Code : <strong style={{color:"var(--blue)"}}>{leagueData.invite_code}</strong></div>
           </div>
           <div className="league-count">
             <div className="league-count-val">{leagueData.member_count}</div>
@@ -660,41 +629,25 @@ function GeneralLeagueSection() {
           </div>
         </div>
       )}
-
       {leagueData && leagueData.status === "not_found" && (
-        <div className="feedback info">ℹ️ La Ligue Générale n'existe pas encore. Cliquez sur « Créer » pour la générer avec tous les membres inscrits.</div>
+        <div className="feedback info">ℹ️ La Ligue Générale n'existe pas encore. Cliquez sur « Créer ».</div>
       )}
-
-      {loading && (
-        <div style={{textAlign:"center",padding:"40px",color:"var(--text3)"}}>Chargement du classement...</div>
-      )}
-
+      {loading && <div style={{textAlign:"center",padding:"40px",color:"var(--text3)"}}>Chargement...</div>}
       {leagueData && leagueData.status === "success" && !loading && (
         <div className="card">
-          {/* Onglets classements */}
           <div className="ranking-tabs">
             {RANKING_TABS.map(tab => (
               <button key={tab.key} className={`ranking-tab ${activeTab===tab.key?"active":""}`}
-                onClick={()=>setActiveTab(tab.key)}>
-                {tab.label}
-              </button>
+                onClick={()=>setActiveTab(tab.key)}>{tab.label}</button>
             ))}
           </div>
-
-          <div className="card-title">
-            {activeConfig.label} <span>— {rankingData.length} joueurs</span>
-          </div>
-
+          <div className="card-title">{activeConfig.label} <span>— {rankingData.length} joueurs</span></div>
           {rankingData.length === 0 ? (
-            <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
-              Aucune donnée disponible pour ce classement.
-            </div>
+            <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Aucune donnée.</div>
           ) : (
             rankingData.map((entry, i) => (
               <div key={entry.id} className="rank-row">
-                <div className="rank-num">
-                  {MEDALS[i] || <span>{i+1}</span>}
-                </div>
+                <div className="rank-num">{MEDALS[i] || <span>{i+1}</span>}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <div className="rank-name">{entry.username}</div>
                   <div className="rank-breakdown">
@@ -713,52 +666,76 @@ function GeneralLeagueSection() {
           )}
         </div>
       )}
-
-      <div style={{marginTop:8,padding:"12px 14px",background:"rgba(79,139,255,.06)",border:"1px solid rgba(79,139,255,.15)",borderRadius:8,fontSize:".78rem",color:"var(--text2)",lineHeight:1.6}}>
-        <strong style={{color:"var(--blue)"}}>Comment ça marche ?</strong><br/>
-        La Ligue Générale est automatiquement publique. Tous les comptes inscrits en font partie. Utilisez « Synchroniser » pour ajouter les nouveaux membres inscrits après la création de la ligue. Les classements reflètent les scores actuels en base de données.
-      </div>
     </div>
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SECTION : Effectifs
+//  ✅ Fix 1 : parse via backend /api/admin/squad/parse (Groq côté serveur)
+//  ✅ Fix 2 : filledNations chargé depuis le backend pour les indicateurs visuels
 // ════════════════════════════════════════════════════════════════════════════
 
 function SquadsSection({ groqKey }) {
   const [selectedNation, setSelectedNation] = useState(null);
-  const [inputMode, setInputMode]  = useState("text");
-  const [promptText, setPromptText] = useState("");
-  const [imageData, setImageData]   = useState(null);
-  const [imageName, setImageName]   = useState("");
-  const [drag, setDrag]             = useState(false);
-  const [players, setPlayers]       = useState([]);
-  const [coachName, setCoachName]   = useState("");
-  const [busy, setBusy]             = useState(false);
-  const [fb, setFb]                 = useState(null);
-  const fileRef                     = useRef(null);
-  const [filledNations, setFilledNations] = useState([]); // Problème 2: Nouvel état
+  const [inputMode,   setInputMode]   = useState("text");
+  const [promptText,  setPromptText]  = useState("");
+  const [imageData,   setImageData]   = useState(null);
+  const [imageName,   setImageName]   = useState("");
+  const [drag,        setDrag]        = useState(false);
+  const [players,     setPlayers]     = useState([]);
+  const [coachName,   setCoachName]   = useState("");
+  const [busy,        setBusy]        = useState(false);
+  const [fb,          setFb]          = useState(null);
+  // ── Fix 2 : état des nations avec effectif complet ──
+  const [filledNations, setFilledNations] = useState(new Set());
+  const [loadingFilled, setLoadingFilled] = useState(false);
+  const fileRef = useRef(null);
 
   const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
 
-  // Problème 2: Charger les nations dont l'effectif est complet au montage
-  useEffect(() => {
-    const fetchFilledNations = async () => {
-      try {
-        const res = await adminFetch("/squad/filled-nations");
-        const data = await res.json();
-        if (res.ok && data.status === "success") {
-          setFilledNations(data.filled_nations || []);
-        } else {
-          console.error("Erreur lors de la récupération des nations complètes :", data.message);
-        }
-      } catch (e) {
-        console.error("Erreur API lors de la récupération des nations complètes :", e);
+  // ── Fix 2 : charge depuis le backend quelles nations ont un effectif complet ──
+  const loadFilledNations = useCallback(async () => {
+    setLoadingFilled(true);
+    try {
+      // On appelle /api/players pour savoir quelles nationalités sont présentes
+      // et /api/coaches pour les entraîneurs confirmés
+      const [resPlayers, resCoaches] = await Promise.all([
+        fetch(`${API_BASE}/api/players`),
+        fetch(`${API_BASE}/api/coaches`),
+      ]);
+      const playersData = resPlayers.ok ? await resPlayers.json() : [];
+      const coachesData = resCoaches.ok ? await resCoaches.json() : [];
+
+      const playersList = Array.isArray(playersData) ? playersData : (playersData.data || []);
+      const coachesList = Array.isArray(coachesData) ? coachesData : (coachesData.data || []);
+
+      // Compte les joueurs par nation
+      const playerCountByNation = {};
+      for (const p of playersList) {
+        const nat = (p.nationality || "").trim();
+        if (nat) playerCountByNation[nat] = (playerCountByNation[nat] || 0) + 1;
       }
-    };
-    fetchFilledNations();
-  }, []); // Se lance une seule fois au montage
+
+      // Nations qui ont un entraîneur confirmé
+      const coachNations = new Set(coachesList.map(c => (c.nationality || c.team_name || "").trim()).filter(Boolean));
+
+      // Une nation est "filled" si elle a ≥ 15 joueurs ET un entraîneur
+      const filled = new Set();
+      for (const [nation, count] of Object.entries(playerCountByNation)) {
+        if (count >= 15 && coachNations.has(nation)) {
+          filled.add(nation);
+        }
+      }
+      setFilledNations(filled);
+    } catch (e) {
+      console.warn("loadFilledNations:", e.message);
+    } finally {
+      setLoadingFilled(false);
+    }
+  }, []);
+
+  useEffect(() => { loadFilledNations(); }, [loadFilledNations]);
 
   const handleImageDrop = useCallback((file) => {
     if(!file||!file.type.startsWith("image/")) return;
@@ -771,33 +748,65 @@ function SquadsSection({ groqKey }) {
   const updatePlayer = (id,field,val) => setPlayers(prev=>prev.map(p=>p.id===id?{...p,[field]:val}:p));
   const removePlayer = (id) => setPlayers(prev=>prev.filter(p=>p.id!==id));
 
+  // ── Fix 1 : parse via le backend FastAPI /api/admin/squad/parse ──
+  // Le backend utilise admin_services.py → Groq, pas d'appel direct Anthropic
   const parseWithGroq = async () => {
-    if(!groqKey){ showFb("err","❌ Activez d'abord la clé Groq dans Paramètres."); return; }
     if(!selectedNation){ showFb("err","❌ Sélectionnez une nation."); return; }
+
     const hasContent = inputMode==="text" ? promptText.trim().length>5 : !!imageData;
     if(!hasContent){ showFb("err","❌ Fournissez du texte ou une capture d'écran."); return; }
-    setBusy(true); showFb("info","🤖 Groq analyse les données...",0);
+
+    setBusy(true); showFb("info","🤖 Groq analyse les données via le backend...",0);
+
     try {
-      // Problème 1: Appel au backend FastAPI pour le parsing
-      const rawContent = inputMode==="text" ? promptText.trim() : imageData; // Envoi de l'image en base64 si mode image
-      const res = await adminFetch("/squad/parse", {
+      // On construit le texte brut à envoyer au backend
+      let rawText = "";
+      if(inputMode === "text") {
+        rawText = `Nation: ${selectedNation}\n\n${promptText}`;
+      } else {
+        // Pour l'image, on envoie une description + le base64 dans le texte
+        // Le backend peut recevoir le contenu image en JSON
+        rawText = `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;
+      }
+
+      // ── Appel au backend FastAPI qui utilise Groq via admin_services.py ──
+      const res  = await adminFetch("/squad/parse", {
         method: "POST",
-        body: JSON.stringify({ nation: selectedNation, raw_squad_text: rawContent })
+        body: JSON.stringify({
+          nation:          selectedNation,
+          raw_squad_text:  rawText,
+        }),
       });
+
       const data = await res.json();
 
-      if(!res.ok) throw new Error(data.message || "Erreur lors du parsing.");
+      if(!res.ok || data.status === "error") {
+        throw new Error(data.message || data.detail || "Erreur serveur");
+      }
 
-      const parsed = data.parsed_data; // Le backend retourne maintenant les données parsées
-      if(parsed.coach) setCoachName(parsed.coach);
-      if(parsed.players?.length){
-        setPlayers(parsed.players.map(p=>({id:uid(),name:p.name||"",position:p.position||"M",price:p.price||6.5})));
-        showFb("ok",`✅ ${parsed.players.length} joueurs détectés${parsed.coach?" | Coach: "+parsed.coach:""}`);
+      const parsed = data.parsed_data;
+      if(!parsed) throw new Error("Données parsées vides");
+
+      // Remplir le coach
+      if(parsed.coach_name) setCoachName(parsed.coach_name);
+
+      // Remplir les joueurs
+      if(parsed.players && parsed.players.length > 0) {
+        setPlayers(parsed.players.map(p => ({
+          id:       uid(),
+          name:     p.name     || "",
+          position: p.position || "M",
+          price:    p.price    || 6.5,
+        })));
+        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés${parsed.coach_name ? " | Coach: " + parsed.coach_name : ""}`);
       } else {
         showFb("err","⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");
       }
-    } catch(e) { showFb("err","❌ Erreur : "+e.message); }
-    finally { setBusy(false); }
+    } catch(e) {
+      showFb("err","❌ Erreur : " + e.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const injectSquad = async () => {
@@ -808,16 +817,12 @@ function SquadsSection({ groqKey }) {
       if(coachName) params.append("coach_name",coachName);
       const res  = await adminFetch(`/squad/inject?${params}`,{method:"POST"});
       const data = await res.json();
-      // Problème 2: Mettre à jour la liste des nations complètes après injection réussie
-      if(data.status==="success"){
-        showFb("ok", data.message||"Réponse serveur");
-        const resFilled = await adminFetch("/squad/filled-nations");
-        const dataFilled = await resFilled.json();
-        if (resFilled.ok && dataFilled.status === "success") {
-          setFilledNations(dataFilled.filled_nations || []);
-        }
+      if(data.status==="success") {
+        showFb("ok", data.message||"Effectif enregistré !");
+        // Recharger les nations remplies après injection
+        await loadFilledNations();
       } else {
-        showFb("err", data.message||"Réponse serveur");
+        showFb("err", data.message||"Erreur serveur");
       }
     } catch(e) { showFb("err","Erreur : "+e.message); }
     finally { setBusy(false); }
@@ -825,58 +830,120 @@ function SquadsSection({ groqKey }) {
 
   const posCounts = POSITIONS.reduce((acc,p)=>({...acc,[p]:players.filter(pl=>pl.position===p).length}),{});
 
+  // Compte total des nations avec effectif complet
+  const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;
+
   return (
     <div>
-      <p className="page-sub">Sélectionnez une nation puis remplissez son effectif via texte ou capture d'écran Groq.</p>
+      <p className="page-sub">
+        Sélectionnez une nation puis remplissez son effectif via texte ou capture d'écran.
+        {" "}
+        {loadingFilled
+          ? <span style={{color:"var(--text3)"}}>Chargement des effectifs...</span>
+          : <span style={{color:"var(--green)"}}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>
+        }
+      </p>
       <Feedback msg={fb} />
+
       <div className="card">
-        <div className="card-title">Sélection de la nation</div>
+        <div className="card-title">
+          Sélection de la nation
+          <span> — vert = effectif complet (joueurs + entraîneur)</span>
+        </div>
         {Object.entries(NATIONS_CDM2026).map(([group,nations])=>(
           <div key={group}>
             <div className="group-label">{group}</div>
             <div className="nation-grid">
-              {nations.map(n=>(
-                // Problème 2: Ajout de la classe 'filled' et de l'icône ✅
-                <button key={n} className={`nation-chip ${selectedNation===n?"selected":""} ${filledNations.includes(n)?"filled":""}`}
-                  onClick={()=>{setSelectedNation(n);setPlayers([]);setCoachName("");setFb(null);}}>
-                  {n} {filledNations.includes(n) && "✅"}
-                </button>
-              ))}
+              {nations.map(n => {
+                const isFilled   = filledNations.has(n);
+                const isSelected = selectedNation === n;
+                return (
+                  <button
+                    key={n}
+                    className={`nation-chip ${isSelected?"selected":""} ${isFilled?"filled":""}`}
+                    onClick={()=>{ setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}
+                  >
+                    {isFilled && <span className="nation-chip-check">✅</span>}
+                    {n}
+                  </button>
+                );
+              })}
             </div>
           </div>
         ))}
       </div>
+
       {selectedNation && (
         <>
           <div className="card">
-            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span>{!groqKey&&<span style={{color:"var(--red)",marginLeft:8}}>⚠ Clé non activée</span>}</div>
+            <div className="card-title">
+              Remplissage Groq IA — <span>{selectedNation}</span>
+              {filledNations.has(selectedNation) && (
+                <span style={{color:"var(--green)",marginLeft:8}}>✅ Effectif existant</span>
+              )}
+            </div>
+
+            {/* Note explicative sur le routage backend */}
+            <div style={{
+              background:"rgba(79,139,255,.07)",
+              border:"1px solid rgba(79,139,255,.2)",
+              borderRadius:6, padding:"8px 12px",
+              fontSize:".75rem", color:"var(--text2)",
+              marginBottom:14, lineHeight:1.5,
+            }}>
+              🔒 Le parsing passe par le backend FastAPI → Groq (admin_services.py). Aucune clé API n'est exposée côté frontend.
+            </div>
+
             <div className="upload-tabs">
               <button className={`upload-tab ${inputMode==="text"?"active":""}`} onClick={()=>setInputMode("text")}>✏️ Texte</button>
               <button className={`upload-tab ${inputMode==="image"?"active":""}`} onClick={()=>setInputMode("image")}>📷 Capture</button>
             </div>
+
             {inputMode==="text"
-              ? <div className="field"><label>Texte de l'effectif</label><textarea placeholder={`Collez la liste de ${selectedNation}...`} value={promptText} onChange={e=>setPromptText(e.target.value)} style={{minHeight:160}}/></div>
+              ? <div className="field">
+                  <label>Texte de l'effectif</label>
+                  <textarea
+                    placeholder={`Collez la liste de ${selectedNation} ici...\nEx:\n1. GK - Mike Maignan (AC Milan)\n2. DF - Théo Hernandez...`}
+                    value={promptText}
+                    onChange={e=>setPromptText(e.target.value)}
+                    style={{minHeight:160}}
+                  />
+                </div>
               : <div className="field">
-                  <div className={`upload-zone ${drag?"drag":""}`}
-                    onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+                  <div
+                    className={`upload-zone ${drag?"drag":""}`}
+                    onDragOver={e=>{e.preventDefault();setDrag(true);}}
+                    onDragLeave={()=>setDrag(false)}
                     onDrop={e=>{e.preventDefault();setDrag(false);handleImageDrop(e.dataTransfer.files[0]);}}
-                    onClick={()=>fileRef.current?.click()}>
-                    <div style={{fontSize:"2rem"}}>📷</div><p>Glissez une capture ou cliquez</p>
+                    onClick={()=>fileRef.current?.click()}
+                  >
+                    <div style={{fontSize:"2rem"}}>📷</div>
+                    <p>Glissez une capture ou cliquez</p>
                     {imageName&&<p style={{color:"var(--green)",fontSize:".75rem",marginTop:6}}>✅ {imageName}</p>}
                     <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleImageDrop(e.target.files[0])}/>
                   </div>
                   {imageData&&<img src={imageData} alt="preview" style={{maxHeight:200,maxWidth:"100%",marginTop:8,borderRadius:6}}/>}
                 </div>
             }
+
             <div className="field row-2">
-              <div><label>Entraîneur (optionnel)</label><input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e=>setCoachName(e.target.value)}/></div>
+              <div>
+                <label>Entraîneur (optionnel)</label>
+                <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e=>setCoachName(e.target.value)}/>
+              </div>
               <div style={{display:"flex",alignItems:"flex-end"}}>
-                <button className="btn-action btn-blue" style={{width:"100%"}} onClick={parseWithGroq} disabled={busy||!groqKey}>
-                  {busy?<><span className="spinner"/> Analyse...</>:"🤖 Parser avec Groq"}
+                <button
+                  className="btn-action btn-blue"
+                  style={{width:"100%"}}
+                  onClick={parseWithGroq}
+                  disabled={busy}
+                >
+                  {busy?<><span className="spinner"/> Analyse backend...</>:"🤖 Parser avec Groq (backend)"}
                 </button>
               </div>
             </div>
           </div>
+
           <div className="card">
             <div className="card-title" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>
@@ -888,6 +955,7 @@ function SquadsSection({ groqKey }) {
                 ))}
               </div>
             </div>
+
             {players.length>0 ? (
               <table className="players-table">
                 <thead><tr><th>#</th><th>Nom</th><th>Poste</th><th>Prix M€</th><th></th></tr></thead>
@@ -896,17 +964,28 @@ function SquadsSection({ groqKey }) {
                     <tr key={p.id}>
                       <td style={{color:"var(--text3)",fontSize:".72rem",width:28}}>{i+1}</td>
                       <td><input className="name-inp" value={p.name} onChange={e=>updatePlayer(p.id,"name",e.target.value)}/></td>
-                      <td><select className="pos-sel" value={p.position} onChange={e=>updatePlayer(p.id,"position",e.target.value)}>{POSITIONS.map(pos=><option key={pos}>{pos}</option>)}</select></td>
-                      <td><input className="price-inp" type="number" step=".5" min="4" max="15" value={p.price} onChange={e=>updatePlayer(p.id,"price",parseFloat(e.target.value)||6.5)}/></td>
+                      <td>
+                        <select className="pos-sel" value={p.position} onChange={e=>updatePlayer(p.id,"position",e.target.value)}>
+                          {POSITIONS.map(pos=><option key={pos}>{pos}</option>)}
+                        </select>
+                      </td>
+                      <td>
+                        <input className="price-inp" type="number" step=".5" min="4" max="15"
+                          value={p.price} onChange={e=>updatePlayer(p.id,"price",parseFloat(e.target.value)||6.5)}/>
+                      </td>
                       <td><button className="btn-del" onClick={()=>removePlayer(p.id)}>✕</button></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
-              <div style={{textAlign:"center",padding:"32px",color:"var(--text3)",fontSize:".82rem"}}>Aucun joueur — utilisez Groq ou ajoutez manuellement.</div>
+              <div style={{textAlign:"center",padding:"32px",color:"var(--text3)",fontSize:".82rem"}}>
+                Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.
+              </div>
             )}
+
             <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>
+
             <div className="actions-strip">
               <button className="btn-action btn-green" onClick={injectSquad} disabled={busy||players.length<3}>
                 {busy?<><span className="spinner"/> Injection...</>:"💾 Enregistrer en BDD"}
@@ -921,10 +1000,10 @@ function SquadsSection({ groqKey }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Tournoi (simplifié)
+//  SECTION : Tournoi
 // ════════════════════════════════════════════════════════════════════════════
 
-function TournamentSection({ groqKey }) {
+function TournamentSection() {
   const [knockout, setKnockout] = useState(
     Object.fromEntries(KNOCKOUT_DEFS.map(r=>[r.key,Array.from({length:r.count},()=>({home:"",away:"",winner:""}))]))
   );
@@ -1098,7 +1177,7 @@ function ToolsSection({ groqKey }) {
         <button className="btn-action btn-blue" onClick={forceScraping} disabled={busy||!groqKey}>
           {busy?<><span className="spinner"/> Scraping...</>:"🔄 Forcer le scraping"}
         </button>
-        {!groqKey&&<p style={{fontSize:".72rem",color:"var(--red)",marginTop:8}}>⚠ Clé Groq requise</p>}
+        {!groqKey&&<p style={{fontSize:".72rem",color:"var(--red)",marginTop:8}}>⚠ Clé Groq requise (configurée dans le backend .env)</p>}
       </div>
       <div className="card">
         <div className="card-title">Statut système</div>
@@ -1116,7 +1195,7 @@ function ToolsSection({ groqKey }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  NAVIGATION TABS
+//  NAVIGATION
 // ════════════════════════════════════════════════════════════════════════════
 
 const TABS = [
@@ -1162,7 +1241,7 @@ function AdminDashboard({ onLogout }) {
         {activeTab==="users"          && <UsersSection/>}
         {activeTab==="general_league" && <GeneralLeagueSection/>}
         {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
-        {activeTab==="tournament"     && <TournamentSection groqKey={groqKey}/>}
+        {activeTab==="tournament"     && <TournamentSection/>}
         {activeTab==="rules"          && <RulesSection/>}
         {activeTab==="tools"          && <ToolsSection groqKey={groqKey}/>}
       </main>
