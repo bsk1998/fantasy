@@ -1,7 +1,8 @@
 /**
  * App.jsx — Application React Fantasy Boulzazen WC 2026
  * ======================================================
- * Contexte utilisateur UNIQUEMENT — admin est totalement indépendant
+ * Fix : session conservée si backend temporairement indisponible
+ *       (token effacé uniquement sur vraie erreur 401, pas sur erreur réseau)
  */
 
 import React, { createContext, useContext, useState, useEffect } from "react";
@@ -18,7 +19,7 @@ import Leaderboard from "./views/Leaderboard";
 import AdminPanel from "./views/AdminPanel";
 
 // ─────────────────────────────────────────────────────────────────────
-//  Contexte Global — UTILISATEUR SEULEMENT (pas d'admin ici)
+//  Contexte Global — UTILISATEUR SEULEMENT
 // ─────────────────────────────────────────────────────────────────────
 
 export const AppContext = createContext();
@@ -33,7 +34,7 @@ export const apiFetch = (path, options = {}) =>
   fetch(`${API_BASE}/api${path}`, options);
 
 // ─────────────────────────────────────────────────────────────────────
-//  Provider — gestion session utilisateur uniquement
+//  Provider
 // ─────────────────────────────────────────────────────────────────────
 
 function AppProvider({ children }) {
@@ -48,16 +49,36 @@ function AppProvider({ children }) {
         const token = localStorage.getItem("auth_token");
         if (token) {
           setSession({ access_token: token });
-          const res = await apiFetch("/auth/me", {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (res.ok) {
-            const userData = await res.json();
-            setUser(userData);
-          } else {
-            // Token expiré ou invalide
-            localStorage.removeItem("auth_token");
-            setSession(null);
+          try {
+            const res = await apiFetch("/auth/me", {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+
+            if (res.ok) {
+              const userData = await res.json();
+              setUser(userData);
+              // Mise en cache locale pour la résilience réseau
+              localStorage.setItem("cached_user", JSON.stringify(userData));
+            } else if (res.status === 401) {
+              // Token véritablement expiré ou invalide — on déconnecte
+              localStorage.removeItem("auth_token");
+              localStorage.removeItem("cached_user");
+              setSession(null);
+            }
+            // Pour tout autre code HTTP (5xx), on conserve la session
+            // sans écraser les données en cache
+          } catch (networkErr) {
+            // Erreur réseau : backend inaccessible ou hors ligne
+            // On restaure l'utilisateur depuis le cache plutôt que de déconnecter
+            console.warn("[App] Backend inaccessible, restauration depuis le cache");
+            const cachedRaw = localStorage.getItem("cached_user");
+            if (cachedRaw) {
+              try {
+                setUser(JSON.parse(cachedRaw));
+              } catch {
+                // Cache corrompu — on reste déconnecté
+              }
+            }
           }
         }
       } catch (err) {
@@ -79,6 +100,7 @@ function AppProvider({ children }) {
     setSession(null);
     localStorage.removeItem("auth_token");
     localStorage.removeItem("user_email");
+    localStorage.removeItem("cached_user");
   };
 
   return (
@@ -95,18 +117,16 @@ function AppProvider({ children }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  AdminAccessDot — lit directement le localStorage, sans contexte user
+//  AdminAccessDot
 // ─────────────────────────────────────────────────────────────────────
 
 function AdminAccessDot() {
-  const [showMenu, setShowMenu]   = useState(false);
-  const [hasToken, setHasToken]   = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
 
-  // Vérifie le token admin depuis localStorage (indépendant du contexte user)
   useEffect(() => {
     const check = () => setHasToken(!!localStorage.getItem("admin_token"));
     check();
-    // Écoute les changements de storage (connexion/déco admin dans un autre onglet)
     window.addEventListener("storage", check);
     return () => window.removeEventListener("storage", check);
   }, []);
@@ -173,7 +193,7 @@ function NotificationToast() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  AppContent — Layout principal
+//  AppContent
 // ─────────────────────────────────────────────────────────────────────
 
 function AppContent() {
@@ -207,7 +227,6 @@ function AppContent() {
             element={user ? <Predictions /> : <Navigate to="/" replace />}
           />
           <Route path="/leaderboard" element={<Leaderboard />} />
-          {/* Admin : route indépendante — AdminPanel gère son propre état */}
           <Route path="/admin" element={<AdminPanel />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
