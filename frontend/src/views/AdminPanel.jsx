@@ -676,7 +676,7 @@ function GeneralLeagueSection() {
 //  ✅ Fix 2 : filledNations chargé depuis le backend pour les indicateurs visuels
 // ════════════════════════════════════════════════════════════════════════════
 
-function SquadsSection({ groqKey }) {
+function SquadsSection() { // groqKey n'est plus nécessaire ici
   const [selectedNation, setSelectedNation] = useState(null);
   const [inputMode,   setInputMode]   = useState("text");
   const [promptText,  setPromptText]  = useState("");
@@ -1268,7 +1268,7 @@ function AdminDashboard({ onLogout }) {
         {activeTab==="settings"       && <SettingsSection groqKey={groqKey} onGroqKeyChange={setGroqKey}/>}
         {activeTab==="users"          && <UsersSection/>}
         {activeTab==="general_league" && <GeneralLeagueSection/>}
-        {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
+        {activeTab==="squads"         && <SquadsSection/>}
         {activeTab==="tournament"     && <TournamentSection/>}
         {activeTab==="rules"          && <RulesSection/>}
         {activeTab==="tools"          && <ToolsSection/>}
