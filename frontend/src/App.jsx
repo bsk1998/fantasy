@@ -1,8 +1,8 @@
 /**
  * App.jsx — Application React Fantasy Boulzazen WC 2026
  * ======================================================
- * Fix : session conservée si backend temporairement indisponible
- *       (token effacé uniquement sur vraie erreur 401, pas sur erreur réseau)
+ * Fix : user initialisé depuis le cache dès le montage (évite l'écran login)
+ *       Token effacé uniquement sur vraie erreur 401
  */
 
 import React, { createContext, useContext, useState, useEffect } from "react";
@@ -19,7 +19,7 @@ import Leaderboard from "./views/Leaderboard";
 import AdminPanel from "./views/AdminPanel";
 
 // ─────────────────────────────────────────────────────────────────────
-//  Contexte Global — UTILISATEUR SEULEMENT
+//  Contexte Global
 // ─────────────────────────────────────────────────────────────────────
 
 export const AppContext = createContext();
@@ -34,13 +34,35 @@ export const apiFetch = (path, options = {}) =>
   fetch(`${API_BASE}/api${path}`, options);
 
 // ─────────────────────────────────────────────────────────────────────
+//  Helpers cache
+// ─────────────────────────────────────────────────────────────────────
+
+function readCachedUser() {
+  try {
+    const raw = localStorage.getItem("cached_user");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  Provider
 // ─────────────────────────────────────────────────────────────────────
 
 function AppProvider({ children }) {
-  const [user,         setUser]         = useState(null);
+  // ✅ Fix session : on initialise user depuis le cache IMMÉDIATEMENT
+  // pour éviter l'écran de login à chaque refresh
+  const [user,         setUser]         = useState(() => {
+    const token = localStorage.getItem("auth_token");
+    if (!token) return null;
+    return readCachedUser();   // peut être null si premier lancement
+  });
   const [loading,      setLoading]      = useState(true);
-  const [session,      setSession]      = useState(null);
+  const [session,      setSession]      = useState(() => {
+    const token = localStorage.getItem("auth_token");
+    return token ? { access_token: token } : null;
+  });
   const [notification, setNotification] = useState(null);
 
   useEffect(() => {
@@ -48,7 +70,6 @@ function AppProvider({ children }) {
       try {
         const token = localStorage.getItem("auth_token");
         if (token) {
-          setSession({ access_token: token });
           try {
             const res = await apiFetch("/auth/me", {
               headers: { Authorization: `Bearer ${token}` },
@@ -57,28 +78,18 @@ function AppProvider({ children }) {
             if (res.ok) {
               const userData = await res.json();
               setUser(userData);
-              // Mise en cache locale pour la résilience réseau
               localStorage.setItem("cached_user", JSON.stringify(userData));
             } else if (res.status === 401) {
-              // Token véritablement expiré ou invalide — on déconnecte
+              // Token véritablement expiré — on déconnecte
               localStorage.removeItem("auth_token");
               localStorage.removeItem("cached_user");
               setSession(null);
+              setUser(null);
             }
-            // Pour tout autre code HTTP (5xx), on conserve la session
-            // sans écraser les données en cache
+            // Pour tout autre code HTTP (5xx), on garde l'état actuel (cache)
           } catch (networkErr) {
-            // Erreur réseau : backend inaccessible ou hors ligne
-            // On restaure l'utilisateur depuis le cache plutôt que de déconnecter
-            console.warn("[App] Backend inaccessible, restauration depuis le cache");
-            const cachedRaw = localStorage.getItem("cached_user");
-            if (cachedRaw) {
-              try {
-                setUser(JSON.parse(cachedRaw));
-              } catch {
-                // Cache corrompu — on reste déconnecté
-              }
-            }
+            // Erreur réseau : le cache est déjà chargé dans l'état initial
+            console.warn("[App] Backend inaccessible, session conservée depuis le cache");
           }
         }
       } catch (err) {
