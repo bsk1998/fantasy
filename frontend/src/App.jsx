@@ -78,15 +78,21 @@ function AppProvider({ children }) {
             if (res.ok) {
               const userData = await res.json();
               setUser(userData);
+              setSession("authenticated"); // Ajouté
               localStorage.setItem("cached_user", JSON.stringify(userData));
-            } else if (res.status === 401) {
-              // Token véritablement expiré — on déconnecte
-              localStorage.removeItem("auth_token");
-              localStorage.removeItem("cached_user");
-              setSession(null);
-              setUser(null);
+              // eslint-disable-next-line no-console
+              console.info("Session restaurée via token."); // Ajouté
+            } else if (res.status === 401 || res.status === 403) { // Modification: ajout 403
+              // Token véritablement expiré ou accès refusé — on déconnecte
+              // eslint-disable-next-line no-console
+              console.warn("Token JWT invalide ou expiré, déconnexion.");
+              logout(); // Remplacement par appel à logout()
+            } else {
+              // Pour d'autres erreurs (ex: 500 serveur), on ne déconnecte pas forcément l'utilisateur
+              // On garde le token en espérant que le problème soit temporaire ou externe à l'auth
+              // eslint-disable-next-line no-console
+              console.error(`Erreur de validation du token (${res.status}), session maintenue pour l'instant.`);
             }
-            // Pour tout autre code HTTP (5xx), on garde l'état actuel (cache)
           } catch (networkErr) {
             // Erreur réseau : le cache est déjà chargé dans l'état initial
             console.warn("[App] Backend inaccessible, session conservée depuis le cache");
