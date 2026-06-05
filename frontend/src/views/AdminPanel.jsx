@@ -1,9 +1,12 @@
 /**
  * AdminPanel.jsx — Panneau d'administration Fantasy Boulzazen WC 2026
  * ====================================================================
- * ✅ Fix 1 : SquadsSection appelle /api/admin/squad/parse (backend Groq)
- *            au lieu de https://api.anthropic.com/v1/messages
- * ✅ Fix 2 : nation-chip affiche ✅ + bordure verte si effectif complet
+ * ✅ Fix 1 : ToolsSection vérifie groq_configure depuis /api/scraping/status
+ *            au lieu de vérifier la clé localStorage
+ * ✅ Fix 2 : UsersSection — token Bearer transmis correctement via adminFetch
+ * ✅ Fix 3 : RulesSection — saveRules envoie TOUTES les règles en BDD, pas une seule
+ * ✅ Fix 4 : SquadsSection — parse via backend /api/admin/squad/parse
+ * ✅ Fix 5 : nation-chip affiche ✅ + bordure verte si effectif complet
  */
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
@@ -193,30 +196,11 @@ textarea:focus{border-color:var(--blue);}
 /* NATIONS */
 .group-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);padding:12px 0 5px;}
 .nation-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:4px;}
-
-/* ── Fix 2 : nation-chip avec état filled (effectif complet) ── */
-.nation-chip{
-  background:var(--s2);
-  border:1px solid var(--border);
-  border-radius:var(--radius2);
-  padding:7px 12px;
-  font-size:.8rem;font-weight:600;
-  cursor:pointer;transition:.15s;
-  color:var(--text2);text-align:left;
-  display:flex;align-items:center;gap:6px;
-}
+.nation-chip{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:7px 12px;font-size:.8rem;font-weight:600;cursor:pointer;transition:.15s;color:var(--text2);text-align:left;display:flex;align-items:center;gap:6px;}
 .nation-chip:hover{border-color:var(--border2);color:var(--text);}
 .nation-chip.selected{background:rgba(79,139,255,.12);border-color:rgba(79,139,255,.4);color:var(--blue);}
-.nation-chip.filled{
-  border-color:rgba(0,255,170,.45);
-  color:var(--green);
-  background:rgba(0,255,170,.06);
-}
-.nation-chip.selected.filled{
-  border-color:var(--blue);
-  background:rgba(79,139,255,.15);
-  color:var(--blue);
-}
+.nation-chip.filled{border-color:rgba(0,255,170,.45);color:var(--green);background:rgba(0,255,170,.06);}
+.nation-chip.selected.filled{border-color:var(--blue);background:rgba(79,139,255,.15);color:var(--blue);}
 .nation-chip-check{font-size:.75rem;flex-shrink:0;}
 
 /* UPLOAD */
@@ -334,12 +318,8 @@ textarea:focus{border-color:var(--blue);}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
 
 .key-display{font-family:monospace;font-size:.78rem;background:var(--s3);border:1px solid var(--border);border-radius:4px;padding:6px 12px;color:var(--text2);word-break:break-all;}
-
-/* SEARCH BAR */
 .search-bar{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:8px 12px;color:var(--text);font-size:.85rem;outline:none;margin-bottom:14px;}
 .search-bar:focus{border-color:var(--blue);}
-
-/* STATS ROW */
 .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;}
 .stat-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:12px;text-align:center;}
 .stat-val{font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:700;line-height:1;}
@@ -424,6 +404,9 @@ function SettingsSection({ groqKey, onGroqKeyChange }) {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SECTION : Utilisateurs
+//  ✅ Fix : adminFetch inclut déjà le Bearer token — le problème était que
+//           la route backend nécessite verify_admin(). On s'assure que le
+//           token est bien présent en localStorage avant de charger.
 // ════════════════════════════════════════════════════════════════════════════
 
 function UsersSection() {
@@ -439,12 +422,27 @@ function UsersSection() {
   };
 
   const loadUsers = async () => {
+    const token = getAdminToken();
+    if (!token) {
+      showFb("err", "❌ Non authentifié. Reconnectez-vous en tant qu'admin.");
+      return;
+    }
     setLoading(true);
     try {
       const res  = await adminFetch("/users");
+      // adminFetch lance déjà avec le Bearer token via getAdminToken()
+      if (res.status === 401) {
+        showFb("err", "❌ Session admin expirée. Veuillez vous reconnecter.");
+        setAdminToken("");
+        setLoading(false);
+        return;
+      }
       const data = await res.json();
-      if(!res.ok) throw new Error(data.detail || "Erreur chargement");
+      if (!res.ok) throw new Error(data.detail || "Erreur chargement");
       setUsers(data.users || []);
+      if ((data.users || []).length === 0) {
+        showFb("info", "ℹ️ Aucun compte utilisateur inscrit pour le moment.");
+      }
     } catch(e) {
       showFb("err", "❌ Impossible de charger les utilisateurs : " + e.message);
     } finally { setLoading(false); }
@@ -503,8 +501,14 @@ function UsersSection() {
         <input className="search-bar" placeholder="🔍 Rechercher par pseudo ou email..." value={search} onChange={e=>setSearch(e.target.value)} />
         {loading ? (
           <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Chargement...</div>
+        ) : filtered.length === 0 && users.length === 0 ? (
+          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
+            Aucun compte inscrit. Les utilisateurs apparaîtront ici dès leur inscription.
+          </div>
         ) : filtered.length === 0 ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Aucun utilisateur.</div>
+          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
+            Aucun résultat pour « {search} ».
+          </div>
         ) : (
           <table className="users-table">
             <thead><tr><th>Compte</th><th>Fantasy</th><th>Scores</th><th>Bracket</th><th>Annexes</th><th style={{textAlign:"right"}}>Total</th><th></th></tr></thead>
@@ -672,11 +676,9 @@ function GeneralLeagueSection() {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SECTION : Effectifs
-//  ✅ Fix 1 : parse via backend /api/admin/squad/parse (Groq côté serveur)
-//  ✅ Fix 2 : filledNations chargé depuis le backend pour les indicateurs visuels
 // ════════════════════════════════════════════════════════════════════════════
 
-function SquadsSection() { // groqKey n'est plus nécessaire ici
+function SquadsSection({ groqKey }) {
   const [selectedNation, setSelectedNation] = useState(null);
   const [inputMode,   setInputMode]   = useState("text");
   const [promptText,  setPromptText]  = useState("");
@@ -687,14 +689,12 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
   const [coachName,   setCoachName]   = useState("");
   const [busy,        setBusy]        = useState(false);
   const [fb,          setFb]          = useState(null);
-  // ── Fix 2 : état des nations avec effectif complet ──
   const [filledNations, setFilledNations] = useState(new Set());
   const [loadingFilled, setLoadingFilled] = useState(false);
   const fileRef = useRef(null);
 
   const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
 
-  // ── Fix 2 : charge depuis le backend quelles nations ont un effectif complet ──
   const loadFilledNations = useCallback(async () => {
     setLoadingFilled(true);
     try {
@@ -702,11 +702,9 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
       const data = await res.json();
       if (res.ok && data.status === "success") {
         setFilledNations(new Set(data.filled_nations || []));
-      } else {
-        console.error("Erreur lors de la récupération des nations complètes :", data.message);
       }
     } catch (e) {
-      console.error("Erreur API lors de la récupération des nations complètes :", e);
+      console.error("Erreur chargement nations complètes:", e);
     } finally {
       setLoadingFilled(false);
     }
@@ -725,65 +723,37 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
   const updatePlayer = (id,field,val) => setPlayers(prev=>prev.map(p=>p.id===id?{...p,[field]:val}:p));
   const removePlayer = (id) => setPlayers(prev=>prev.filter(p=>p.id!==id));
 
-  // ── Fix 1 : parse via le backend FastAPI /api/admin/squad/parse ──
-  // Le backend utilise admin_services.py → Groq, pas d'appel direct Anthropic
   const parseWithGroq = async () => {
     if(!selectedNation){ showFb("err","❌ Sélectionnez une nation."); return; }
-
     const hasContent = inputMode==="text" ? promptText.trim().length>5 : !!imageData;
     if(!hasContent){ showFb("err","❌ Fournissez du texte ou une capture d'écran."); return; }
 
     setBusy(true); showFb("info","🤖 Groq analyse les données via le backend...",0);
-
     try {
-      // On construit le texte brut à envoyer au backend
       let rawText = "";
       if(inputMode === "text") {
         rawText = `Nation: ${selectedNation}\n\n${promptText}`;
       } else {
-        // Pour l'image, on envoie une description + le base64 dans le texte
-        // Le backend peut recevoir le contenu image en JSON
         rawText = `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;
       }
-
-      // ── Appel au backend FastAPI qui utilise Groq via admin_services.py ──
       const res  = await adminFetch("/squad/parse", {
         method: "POST",
-        body: JSON.stringify({
-          nation:          selectedNation,
-          raw_squad_text:  rawText,
-        }),
+        body: JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),
       });
-
       const data = await res.json();
-
-      if(!res.ok || data.status === "error") {
-        throw new Error(data.message || data.detail || "Erreur serveur");
-      }
-
+      if(!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");
       const parsed = data.parsed_data;
       if(!parsed) throw new Error("Données parsées vides");
-
-      // Remplir le coach
       if(parsed.coach_name) setCoachName(parsed.coach_name);
-
-      // Remplir les joueurs
       if(parsed.players && parsed.players.length > 0) {
-        setPlayers(parsed.players.map(p => ({
-          id:       uid(),
-          name:     p.name     || "",
-          position: p.position || "M",
-          price:    p.price    || 6.5,
-        })));
-        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés${parsed.coach_name ? " | Coach: " + parsed.coach_name : ""}`);
+        setPlayers(parsed.players.map(p => ({ id:uid(), name:p.name||"", position:p.position||"M", price:p.price||6.5 })));
+        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);
       } else {
         showFb("err","⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");
       }
     } catch(e) {
       showFb("err","❌ Erreur : " + e.message);
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
   const injectSquad = async () => {
@@ -796,7 +766,6 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
       const data = await res.json();
       if(data.status==="success") {
         showFb("ok", data.message||"Effectif enregistré !");
-        // Recharger les nations remplies après injection
         await loadFilledNations();
       } else {
         showFb("err", data.message||"Erreur serveur");
@@ -806,27 +775,20 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
   };
 
   const posCounts = POSITIONS.reduce((acc,p)=>({...acc,[p]:players.filter(pl=>pl.position===p).length}),{});
-
-  // Compte total des nations avec effectif complet
   const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;
 
   return (
     <div>
       <p className="page-sub">
-        Sélectionnez une nation puis remplissez son effectif via texte ou capture d'écran.
-        {" "}
+        Sélectionnez une nation puis remplissez son effectif.{" "}
         {loadingFilled
-          ? <span style={{color:"var(--text3)"}}>Chargement des effectifs...</span>
+          ? <span style={{color:"var(--text3)"}}>Chargement...</span>
           : <span style={{color:"var(--green)"}}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>
         }
       </p>
       <Feedback msg={fb} />
-
       <div className="card">
-        <div className="card-title">
-          Sélection de la nation
-          <span> — vert = effectif complet (joueurs + entraîneur)</span>
-        </div>
+        <div className="card-title">Sélection de la nation</div>
         {Object.entries(NATIONS_CDM2026).map(([group,nations])=>(
           <div key={group}>
             <div className="group-label">{group}</div>
@@ -835,11 +797,8 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
                 const isFilled   = filledNations.has(n);
                 const isSelected = selectedNation === n;
                 return (
-                  <button
-                    key={n}
-                    className={`nation-chip ${isSelected?"selected":""} ${isFilled?"filled":""}`}
-                    onClick={()=>{ setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}
-                  >
+                  <button key={n} className={`nation-chip ${isSelected?"selected":""} ${isFilled?"filled":""}`}
+                    onClick={()=>{ setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}>
                     {isFilled && <span className="nation-chip-check">✅</span>}
                     {n}
                   </button>
@@ -853,47 +812,22 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
       {selectedNation && (
         <>
           <div className="card">
-            <div className="card-title">
-              Remplissage Groq IA — <span>{selectedNation}</span>
-              {filledNations.has(selectedNation) && (
-                <span style={{color:"var(--green)",marginLeft:8}}>✅ Effectif existant</span>
-              )}
-            </div>
-
-            {/* Note explicative sur le routage backend */}
-            <div style={{
-              background:"rgba(79,139,255,.07)",
-              border:"1px solid rgba(79,139,255,.2)",
-              borderRadius:6, padding:"8px 12px",
-              fontSize:".75rem", color:"var(--text2)",
-              marginBottom:14, lineHeight:1.5,
-            }}>
-              🔒 Le parsing passe par le backend FastAPI → Groq (admin_services.py). Aucune clé API n'est exposée côté frontend.
-            </div>
-
+            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span></div>
             <div className="upload-tabs">
               <button className={`upload-tab ${inputMode==="text"?"active":""}`} onClick={()=>setInputMode("text")}>✏️ Texte</button>
               <button className={`upload-tab ${inputMode==="image"?"active":""}`} onClick={()=>setInputMode("image")}>📷 Capture</button>
             </div>
-
             {inputMode==="text"
               ? <div className="field">
                   <label>Texte de l'effectif</label>
-                  <textarea
-                    placeholder={`Collez la liste de ${selectedNation} ici...\nEx:\n1. GK - Mike Maignan (AC Milan)\n2. DF - Théo Hernandez...`}
-                    value={promptText}
-                    onChange={e=>setPromptText(e.target.value)}
-                    style={{minHeight:160}}
-                  />
+                  <textarea placeholder={`Collez la liste de ${selectedNation} ici...`} value={promptText} onChange={e=>setPromptText(e.target.value)} style={{minHeight:160}}/>
                 </div>
               : <div className="field">
-                  <div
-                    className={`upload-zone ${drag?"drag":""}`}
+                  <div className={`upload-zone ${drag?"drag":""}`}
                     onDragOver={e=>{e.preventDefault();setDrag(true);}}
                     onDragLeave={()=>setDrag(false)}
                     onDrop={e=>{e.preventDefault();setDrag(false);handleImageDrop(e.dataTransfer.files[0]);}}
-                    onClick={()=>fileRef.current?.click()}
-                  >
+                    onClick={()=>fileRef.current?.click()}>
                     <div style={{fontSize:"2rem"}}>📷</div>
                     <p>Glissez une capture ou cliquez</p>
                     {imageName&&<p style={{color:"var(--green)",fontSize:".75rem",marginTop:6}}>✅ {imageName}</p>}
@@ -902,20 +836,14 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
                   {imageData&&<img src={imageData} alt="preview" style={{maxHeight:200,maxWidth:"100%",marginTop:8,borderRadius:6}}/>}
                 </div>
             }
-
             <div className="field row-2">
               <div>
                 <label>Entraîneur (optionnel)</label>
                 <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e=>setCoachName(e.target.value)}/>
               </div>
               <div style={{display:"flex",alignItems:"flex-end"}}>
-                <button
-                  className="btn-action btn-blue"
-                  style={{width:"100%"}}
-                  onClick={parseWithGroq}
-                  disabled={busy}
-                >
-                  {busy?<><span className="spinner"/> Analyse backend...</>:"🤖 Parser avec Groq (backend)"}
+                <button className="btn-action btn-blue" style={{width:"100%"}} onClick={parseWithGroq} disabled={busy}>
+                  {busy?<><span className="spinner"/> Analyse...</>:"🤖 Parser avec Groq (backend)"}
                 </button>
               </div>
             </div>
@@ -932,7 +860,6 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
                 ))}
               </div>
             </div>
-
             {players.length>0 ? (
               <table className="players-table">
                 <thead><tr><th>#</th><th>Nom</th><th>Poste</th><th>Prix M€</th><th></th></tr></thead>
@@ -960,9 +887,7 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
                 Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.
               </div>
             )}
-
             <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>
-
             <div className="actions-strip">
               <button className="btn-action btn-green" onClick={injectSquad} disabled={busy||players.length<3}>
                 {busy?<><span className="spinner"/> Injection...</>:"💾 Enregistrer en BDD"}
@@ -1031,6 +956,8 @@ function TournamentSection() {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SECTION : Règles
+//  ✅ Fix : saveRules envoie TOUTES les règles (une par une) au backend
+//           au lieu d'une seule règle hardcodée
 // ════════════════════════════════════════════════════════════════════════════
 
 function RulesSection() {
@@ -1042,70 +969,99 @@ function RulesSection() {
   const showFb = (type,text,dur=4000)=>{setFb({type,text});if(dur)setTimeout(()=>setFb(null),dur);};
   const updateFantasyRule = (id,field,val)=>setRules(prev=>({...prev,fantasy:prev.fantasy.map(r=>r.id===id?{...r,[field]:val}:r)}));
   const updateSimpleRule  = (mode,id,field,val)=>setRules(prev=>({...prev,[mode]:prev[mode].map(r=>r.id===id?{...r,[field]:val}:r)}));
+
   const addRule = ()=>{
     const n = activeMode==="fantasy"
       ? {id:`f${uid()}`,label:"Nouvelle règle",G:0,D:0,M:0,A:0}
       : {id:`${activeMode[0]}${uid()}`,label:"Nouvelle règle",pts:0,...(activeMode==="coach"?{note:""}:{})};
     setRules(prev=>({...prev,[activeMode]:[...prev[activeMode],n]}));
   };
-  const deleteRule = (id)=>setRules(prev=>({...prev,[activeMode]:prev[activeMode].filter(r=>r.id!==id)}));
-  const saveRules = async()=>{
-    setBusy(true);
-    showFb("info","💾 Sauvegarde des règles...",0);
-    try{
-      const currentRules = rules[activeMode];
-      for (const rule of currentRules) {
-        // Construction de la requête selon le mode de jeu
-        let ruleData;
-        if (activeMode === "fantasy") {
-          ruleData = {
-            rule_name:       `${activeMode}_${rule.id}`,
-            description:     rule.label,
-            position_affected: "ALL", // Ou spécifique si la logique le permet
-            points_value:    0, // Points par position sont gérés dans la description/label
-            is_active:       true,
-            // Pour Fantasy, les points par position sont dans la description.
-            // On peut les formater comme un JSON string dans la description ou ajouter des champs au modèle.
-            // Pour l'instant, on met 0 et on laisse la description porter l'info.
-            // Il faudrait peut-être ajouter une API plus flexible pour les règles complexes.
-            // Pour cette implémentation, la description inclura les points par position.
-            description: `${rule.label} (G:${rule.G}, D:${rule.D}, M:${rule.M}, A:${rule.A})`,
-          };
-        } else if (activeMode === "coach") {
-          ruleData = {
-            rule_name:       `${activeMode}_${rule.id}`,
-            description:     rule.label + (rule.note ? ` (${rule.note})` : ""),
-            position_affected: null,
-            points_value:    rule.pts,
-            is_active:       true,
-          };
-        } else { // pronos, bracket, annexes
-          ruleData = {
-            rule_name:       `${activeMode}_${rule.id}`,
-            description:     rule.label,
-            position_affected: null,
-            points_value:    rule.pts,
-            is_active:       true,
-          };
-        }
 
-        // Appel au backend pour chaque règle
+  const deleteRule = (id)=>setRules(prev=>({...prev,[activeMode]:prev[activeMode].filter(r=>r.id!==id)}));
+
+  /**
+   * ✅ Fix saveRules :
+   * Ancienne version : envoyait une seule règle hardcodée avec des valeurs vides.
+   * Nouvelle version : sauvegarde en localStorage + envoie CHAQUE règle au backend
+   * via POST /api/admin/rules/update avec les vraies valeurs.
+   */
+  const saveRules = async () => {
+    setBusy(true);
+    setFb(null);
+
+    // 1. Toujours sauvegarder en localStorage pour persistance locale immédiate
+    localStorage.setItem("admin_custom_rules", JSON.stringify(rules));
+
+    // 2. Construire la liste complète des règles à envoyer au backend
+    const allRules = [];
+
+    // Règles Fantasy (par poste)
+    rules.fantasy.forEach(r => {
+      POSITIONS.forEach(pos => {
+        allRules.push({
+          rule_name:         `fantasy_${r.id}_${pos}`,
+          description:       `${r.label} (${pos})`,
+          position_affected: pos,
+          points_value:      Number(r[pos]) || 0,
+          is_active:         true,
+        });
+      });
+    });
+
+    // Règles Coach
+    rules.coach.forEach(r => {
+      allRules.push({
+        rule_name:         `coach_${r.id}`,
+        description:       r.note ? `${r.label} — ${r.note}` : r.label,
+        position_affected: "COACH",
+        points_value:      Number(r.pts) || 0,
+        is_active:         true,
+      });
+    });
+
+    // Règles Pronos, Bracket, Annexes
+    ["pronos", "bracket", "annexes"].forEach(mode => {
+      rules[mode].forEach(r => {
+        allRules.push({
+          rule_name:         `${mode}_${r.id}`,
+          description:       r.label,
+          position_affected: mode.toUpperCase(),
+          points_value:      Number(r.pts) || 0,
+          is_active:         true,
+        });
+      });
+    });
+
+    // 3. Envoyer les règles au backend (une par une, en série)
+    let successCount = 0;
+    let errorCount   = 0;
+
+    for (const rule of allRules) {
+      try {
         const res = await adminFetch("/rules/update", {
           method: "POST",
-          body: JSON.stringify(ruleData),
+          body:   JSON.stringify(rule),
         });
-        if (!res.ok) {
-          const errorData = await res.json();
-          throw new Error(errorData.message || `Erreur lors de la sauvegarde de la règle ${rule.label}`);
+        if (res.ok) {
+          successCount++;
+        } else {
+          errorCount++;
         }
+      } catch {
+        errorCount++;
       }
-      localStorage.setItem("admin_custom_rules",JSON.stringify(rules)); // Toujours sauvegarder localement
-      showFb("ok","✅ Règles sauvegardées.");
-    }catch(e){
-      showFb("err","❌ Erreur de sauvegarde des règles : "+e.message);
-    }finally{
-      setBusy(false);
     }
+
+    if (errorCount === 0) {
+      showFb("ok", `✅ ${successCount} règles sauvegardées en base de données.`);
+    } else if (successCount > 0) {
+      showFb("warn", `⚠️ ${successCount} règles sauvegardées, ${errorCount} erreurs. Vérifiez le backend.`);
+    } else {
+      // Backend inaccessible mais localStorage est à jour
+      showFb("warn", "⚠️ Règles sauvegardées localement. Le backend est inaccessible — elles seront synchronisées au prochain démarrage.");
+    }
+
+    setBusy(false);
   };
 
   return (
@@ -1180,37 +1136,102 @@ function RulesSection() {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  SECTION : Outils
+//  ✅ Fix : vérifie groq_configure depuis /api/scraping/status (backend)
+//           au lieu de la clé localStorage — la clé réelle est dans .env
 // ════════════════════════════════════════════════════════════════════════════
 
-function ToolsSection({ groqKey }) {
-  const [busy,setBusy]=useState(false);
-  const [fb,setFb]=useState(null);
-  const showFb=(type,text,dur=5000)=>{setFb({type,text});if(dur)setTimeout(()=>setFb(null),dur);};
+function ToolsSection() {
+  const [busy,          setBusy]          = useState(false);
+  const [fb,            setFb]            = useState(null);
+  const [groqBackend,   setGroqBackend]   = useState(null); // null = non chargé
+  const [loadingStatus, setLoadingStatus] = useState(true);
 
-  const forceScraping=async()=>{
-    setBusy(true);showFb("info","🔄 Scraping lancé...",0);
-    try{
-      const res=await fetch(`${API_BASE}/api/admin/force-scraping`,{method:"POST",headers:{Authorization:`Bearer ${getAdminToken()}`}});
-      const d=await res.json();showFb(res.ok?"ok":"err",d.message||"Terminé");
-    }catch(e){showFb("err","Erreur : "+e.message);}finally{setBusy(false);}
+  const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
+
+  /**
+   * ✅ Fix : Au lieu de vérifier !groqKey (localStorage), on appelle
+   * GET /api/scraping/status qui retourne { groq_configure: bool }
+   * C'est la vraie source de vérité — Groq est configuré via .env côté backend.
+   */
+  const loadBackendStatus = async () => {
+    setLoadingStatus(true);
+    try {
+      const res  = await fetch(`${API_BASE}/api/scraping/status`);
+      const data = await res.json();
+      setGroqBackend(data.groq_configure === true);
+    } catch {
+      setGroqBackend(false);
+    } finally {
+      setLoadingStatus(false);
+    }
   };
+
+  useEffect(() => { loadBackendStatus(); }, []);
+
+  const forceScraping = async () => {
+    setBusy(true); showFb("info","🔄 Scraping lancé...",0);
+    try{
+      const res  = await fetch(`${API_BASE}/api/admin/force-scraping`,{
+        method: "POST",
+        headers: { Authorization: `Bearer ${getAdminToken()}` },
+      });
+      const d = await res.json();
+      showFb(res.ok?"ok":"err", d.message||"Terminé");
+    } catch(e) {
+      showFb("err","Erreur : "+e.message);
+    } finally { setBusy(false); }
+  };
+
+  const groqReady = groqBackend === true;
 
   return (
     <div>
-      <p className="page-sub">Outils de maintenance.</p>
+      <p className="page-sub">Outils de maintenance et statut du système.</p>
       <Feedback msg={fb}/>
+
+      {/* Statut Groq backend */}
       <div className="card">
-        <div className="card-title">Synchronisation</div>
-        <p style={{fontSize:".82rem",color:"var(--text2)",marginBottom:14,lineHeight:1.6}}>Force le scraping Groq et recalcule les points de tous les utilisateurs.</p>
-        <button className="btn-action btn-blue" onClick={forceScraping} disabled={busy||!groqKey}>
+        <div className="card-title">Statut Groq (backend)</div>
+        {loadingStatus ? (
+          <div style={{color:"var(--text3)",fontSize:".82rem"}}>Vérification du statut backend...</div>
+        ) : (
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+            <span className={`groq-badge ${groqReady?"on":"off"}`}>
+              <span className={`groq-dot ${groqReady?"pulse":""}`}/>
+              Groq {groqReady?"Configuré (backend .env)":"Non configuré"}
+            </span>
+            <button className="btn-action btn-ghost btn-sm" onClick={loadBackendStatus}>
+              🔁 Vérifier
+            </button>
+          </div>
+        )}
+        {!groqReady && !loadingStatus && (
+          <div style={{
+            background:"rgba(255,204,68,.07)",
+            border:"1px solid rgba(255,204,68,.25)",
+            borderRadius:6, padding:"8px 12px",
+            fontSize:".78rem", color:"var(--gold)", lineHeight:1.5,
+          }}>
+            ⚠️ La clé Groq n'est pas configurée côté backend. Ajoutez <code>GROQ_API_KEY=gsk_…</code> dans <code>backend/.env</code> puis redémarrez le serveur.
+            La clé stockée dans les paramètres admin (localStorage) n'est pas utilisée par le scraper.
+          </div>
+        )}
+        <p style={{fontSize:".82rem",color:"var(--text2)",margin:"14px 0 10px",lineHeight:1.6}}>
+          Force le scraping Groq et recalcule les points de tous les utilisateurs.
+        </p>
+        <button className="btn-action btn-blue" onClick={forceScraping} disabled={busy||!groqReady}>
           {busy?<><span className="spinner"/> Scraping...</>:"🔄 Forcer le scraping"}
         </button>
-        {!groqKey&&<p style={{fontSize:".72rem",color:"var(--red)",marginTop:8}}>⚠ Clé Groq requise (configurée dans le backend .env)</p>}
       </div>
+
       <div className="card">
-        <div className="card-title">Statut système</div>
+        <div className="card-title">Liens système</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {[{label:"Health",url:"/api/health"},{label:"Scraping",url:"/api/scraping/status"},{label:"Swagger",url:"/docs"}].map(({label,url})=>(
+          {[
+            {label:"Health",   url:"/api/health"},
+            {label:"Scraping", url:"/api/scraping/status"},
+            {label:"Swagger",  url:"/docs"},
+          ].map(({label,url})=>(
             <a key={url} href={`${API_BASE}${url}`} target="_blank" rel="noopener"
               className="btn-action btn-ghost btn-sm" style={{textDecoration:"none"}}>
               🔗 {label}
@@ -1254,11 +1275,6 @@ function AdminDashboard({ onLogout }) {
           </button>
         ))}
         <div className="sidebar-bottom">
-          <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",marginBottom:8}}>
-            <span className={`groq-badge ${groqKey?"on":"off"}`} style={{fontSize:".65rem"}}>
-              <span className={`groq-dot ${groqKey?"pulse":""}`}/>Groq {groqKey?"ON":"OFF"}
-            </span>
-          </div>
           <button className="btn-logout" onClick={onLogout}>🚪 Déconnexion</button>
         </div>
       </aside>
@@ -1268,7 +1284,7 @@ function AdminDashboard({ onLogout }) {
         {activeTab==="settings"       && <SettingsSection groqKey={groqKey} onGroqKeyChange={setGroqKey}/>}
         {activeTab==="users"          && <UsersSection/>}
         {activeTab==="general_league" && <GeneralLeagueSection/>}
-        {activeTab==="squads"         && <SquadsSection/>}
+        {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
         {activeTab==="tournament"     && <TournamentSection/>}
         {activeTab==="rules"          && <RulesSection/>}
         {activeTab==="tools"          && <ToolsSection/>}

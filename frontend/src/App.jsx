@@ -1,8 +1,8 @@
 /**
  * App.jsx — Application React Fantasy Boulzazen WC 2026
  * ======================================================
- * Fix : user initialisé depuis le cache dès le montage (évite l'écran login)
- *       Token effacé uniquement sur vraie erreur 401
+ * Fix session : user initialisé depuis le cache dès le montage (évite l'écran login)
+ * Token effacé UNIQUEMENT sur vraie erreur 401 — jamais sur erreur réseau/5xx
  */
 
 import React, { createContext, useContext, useState, useEffect } from "react";
@@ -46,64 +46,83 @@ function readCachedUser() {
   }
 }
 
+function writeCachedUser(userData) {
+  try {
+    localStorage.setItem("cached_user", JSON.stringify(userData));
+  } catch {
+    // silencieux
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //  Provider
 // ─────────────────────────────────────────────────────────────────────
 
 function AppProvider({ children }) {
-  // ✅ Fix session : on initialise user depuis le cache IMMÉDIATEMENT
-  // pour éviter l'écran de login à chaque refresh
-  const [user,         setUser]         = useState(() => {
+  /**
+   * INIT IMMÉDIAT depuis le cache :
+   * Si un token existe en localStorage, on charge le user depuis le cache
+   * AVANT même que /api/auth/me réponde.
+   * Ça évite le flash "écran login" à chaque refresh.
+   */
+  const [user, setUser] = useState(() => {
     const token = localStorage.getItem("auth_token");
     if (!token) return null;
-    return readCachedUser();   // peut être null si premier lancement
+    return readCachedUser(); // peut être null au tout premier lancement
   });
-  const [loading,      setLoading]      = useState(true);
-  const [session,      setSession]      = useState(() => {
+
+  const [loading, setLoading] = useState(true);
+
+  const [session, setSession] = useState(() => {
     const token = localStorage.getItem("auth_token");
     return token ? { access_token: token } : null;
   });
+
   const [notification, setNotification] = useState(null);
+  const [syncData, setSyncData] = useState(null);
 
   useEffect(() => {
     const initApp = async () => {
       try {
         const token = localStorage.getItem("auth_token");
-        if (token) {
-          try {
-            const res = await apiFetch("/auth/me", {
-              headers: { Authorization: `Bearer ${token}` },
-            });
 
-            if (res.ok) {
-              const userData = await res.json();
-              setUser(userData);
-              setSession("authenticated"); // Ajouté
-              localStorage.setItem("cached_user", JSON.stringify(userData));
-              // eslint-disable-next-line no-console
-              console.info("Session restaurée via token."); // Ajouté
-            } else if (res.status === 401 || res.status === 403) { // Modification: ajout 403
-              // Token véritablement expiré ou accès refusé — on déconnecte
-              // eslint-disable-next-line no-console
-              console.warn("Token JWT invalide ou expiré, déconnexion.");
-              logout(); // Remplacement par appel à logout()
-            } else {
-              // Pour d'autres erreurs (ex: 500 serveur), on ne déconnecte pas forcément l'utilisateur
-              // On garde le token en espérant que le problème soit temporaire ou externe à l'auth
-              // eslint-disable-next-line no-console
-              console.error(`Erreur de validation du token (${res.status}), session maintenue pour l'instant.`);
-            }
-          } catch (networkErr) {
-            // Erreur réseau : le cache est déjà chargé dans l'état initial
-            console.warn("[App] Backend inaccessible, session conservée depuis le cache");
+        if (!token) {
+          // Pas de token → pas connecté, pas besoin d'appel réseau
+          setLoading(false);
+          return;
+        }
+
+        try {
+          const res = await apiFetch("/auth/me", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          if (res.ok) {
+            // ✅ Token valide → on met à jour le cache et l'état
+            const userData = await res.json();
+            setUser(userData);
+            writeCachedUser(userData);
+          } else if (res.status === 401) {
+            // ✅ Token vraiment expiré/invalide → déconnexion propre
+            localStorage.removeItem("auth_token");
+            localStorage.removeItem("cached_user");
+            setSession(null);
+            setUser(null);
           }
+          // Pour tout autre code HTTP (5xx, 502, 503...) :
+          // On NE touche PAS à l'état. Le cache chargé lors du useState() reste valide.
+        } catch {
+          // Erreur réseau (backend hors ligne, timeout...) :
+          // On NE touche PAS à l'état non plus. L'utilisateur reste connecté via le cache.
+          console.warn("[App] Backend inaccessible — session conservée depuis le cache.");
         }
       } catch (err) {
-        console.error("[App] Init erreur:", err);
+        console.error("[App] Init erreur inattendue:", err);
       } finally {
         setLoading(false);
       }
     };
+
     initApp();
   }, []);
 
@@ -126,6 +145,7 @@ function AppProvider({ children }) {
       session, setSession,
       loading, setLoading,
       notification, notify,
+      syncData, setSyncData,
       logout, apiFetch, API_BASE,
     }}>
       {children}
