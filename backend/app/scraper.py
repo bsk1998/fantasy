@@ -1,21 +1,14 @@
 """
-scraper.py — Pipeline IA complet pour Fantasy Boulzazen WC 2026
-================================================================
-Architecture : Groq LLM (llama-3.3-70b) avec web_search intégré
-              → extraction structurée → BDD SQLite
-
-Sources :
-  - FIFA.com officiel (matchs, résultats)
-  - Sofascore (stats joueurs en temps réel)
-  - Olympics.com (effectifs officiels)
-  - Transfermarkt (valeurs marchés / prix Fantasy)
-
-Avantage vs Playwright : Groq recherche lui-même sur le web,
-aucune dépendance lourde, fonctionne sur Render free tier.
+scraper.py — Pipeline IA Fantasy Boulzazen WC 2026
+====================================================
+v7.0 — Double moteur IA : Groq (rapide) + Gemini (puissant)
+       - Groq   : llama-3.3-70b-versatile  (principal)
+       - Gemini : gemini-2.0-flash-exp      (fallback / tâches lourdes)
+       - AI_PROVIDER=auto → Groq d'abord, Gemini si Groq échoue
+       - AI_PROVIDER=groq / gemini → force un seul moteur
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -28,11 +21,18 @@ import httpx
 
 logger = logging.getLogger("fantasy_scraper")
 
-# ── Config Groq ───────────────────────────────────────────────────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_BASE    = "https://api.groq.com/openai/v1"
-GROQ_MODEL   = "llama-3.3-70b-versatile"      # meilleur rapport qualité/vitesse
-GROQ_MODEL_FAST = "llama-3.1-8b-instant"      # pour les tâches simples
+# ── Config ────────────────────────────────────────────────────────────────────
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+AI_PROVIDER    = os.getenv("AI_PROVIDER", "auto").lower()   # auto | groq | gemini
+
+GROQ_BASE       = "https://api.groq.com/openai/v1"
+GROQ_MODEL      = "llama-3.3-70b-versatile"
+GROQ_MODEL_FAST = "llama-3.1-8b-instant"
+
+GEMINI_BASE        = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL       = "gemini-2.0-flash-exp"      # le plus puissant disponible gratuitement
+GEMINI_MODEL_FAST  = "gemini-1.5-flash"           # plus rapide pour les tâches simples
 
 # ── Cache mémoire ─────────────────────────────────────────────────────────────
 _cache: dict[str, tuple[float, Any]] = {}
@@ -50,8 +50,32 @@ def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
 
 
+def get_scraping_status() -> dict:
+    """Retourne le statut des deux moteurs IA."""
+    return {
+        "groq_configure":   bool(GROQ_API_KEY),
+        "gemini_configure": bool(GEMINI_API_KEY),
+        "ai_provider":      AI_PROVIDER,
+        "active_model":     _get_active_provider_name(),
+    }
+
+
+def _get_active_provider_name() -> str:
+    if AI_PROVIDER == "gemini":
+        return f"Gemini ({GEMINI_MODEL})" if GEMINI_API_KEY else "⚠️ Gemini non configuré"
+    if AI_PROVIDER == "groq":
+        return f"Groq ({GROQ_MODEL})" if GROQ_API_KEY else "⚠️ Groq non configuré"
+    # auto
+    if GROQ_API_KEY:
+        suffix = f" + Gemini fallback ({GEMINI_MODEL})" if GEMINI_API_KEY else ""
+        return f"Groq ({GROQ_MODEL}){suffix}"
+    if GEMINI_API_KEY:
+        return f"Gemini ({GEMINI_MODEL}) [Groq absent]"
+    return "⚠️ Aucune clé IA configurée"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLIENT GROQ ASYNC
+#  CLIENTS IA
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _groq_chat(
@@ -59,22 +83,16 @@ async def _groq_chat(
     model: str = GROQ_MODEL,
     max_tokens: int = 4096,
     temperature: float = 0.1,
-    response_format: Optional[dict] = None,
 ) -> Optional[str]:
-    """Appel Groq API avec retry et gestion d'erreurs robuste."""
+    """Appel Groq API avec retry."""
     if not GROQ_API_KEY:
-        logger.warning("GROQ_API_KEY manquante — scraping désactivé")
         return None
-
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    if response_format:
-        payload["response_format"] = response_format
-
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -90,13 +108,140 @@ async def _groq_chat(
                     await asyncio.sleep(2 ** attempt + 1)
                     continue
                 r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"]
+                return r.json()["choices"][0]["message"]["content"]
         except Exception as e:
             logger.warning(f"Groq attempt {attempt+1}/3 failed: {e}")
             if attempt < 2:
                 await asyncio.sleep(2)
+    return None
 
+
+async def _gemini_chat(
+    messages: list[dict],
+    model: str = GEMINI_MODEL,
+    max_tokens: int = 4096,
+    temperature: float = 0.1,
+) -> Optional[str]:
+    """
+    Appel Gemini API (Google AI Studio).
+    Convertit le format OpenAI → Gemini contents.
+    """
+    if not GEMINI_API_KEY:
+        return None
+
+    # Convertir messages OpenAI → Gemini format
+    contents = []
+    system_text = ""
+    for m in messages:
+        role = m.get("role", "user")
+        text = m.get("content", "")
+        if role == "system":
+            system_text = text          # Gemini gère le system via systemInstruction
+        elif role == "user":
+            contents.append({"role": "user", "parts": [{"text": text}]})
+        elif role == "assistant":
+            contents.append({"role": "model", "parts": [{"text": text}]})
+
+    # Si pas de contents mais un system text, l'ajouter comme user
+    if not contents and system_text:
+        contents.append({"role": "user", "parts": [{"text": system_text}]})
+
+    payload: dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+        },
+    }
+    if system_text and contents:
+        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+
+    url = f"{GEMINI_BASE}/models/{model}:generateContent?key={GEMINI_API_KEY}"
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+                if r.status_code == 429:
+                    await asyncio.sleep(3 ** attempt + 1)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                # Extraire le texte de la réponse Gemini
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", "")
+        except Exception as e:
+            logger.warning(f"Gemini attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)
+    return None
+
+
+async def _ai_chat(
+    messages: list[dict],
+    max_tokens: int = 4096,
+    temperature: float = 0.1,
+    prefer_powerful: bool = False,   # True = préférer Gemini pour tâches complexes
+    fast: bool = False,              # True = utiliser le modèle rapide
+) -> Optional[str]:
+    """
+    Moteur IA unifié.
+    - auto    : Groq d'abord, Gemini en fallback
+    - groq    : Groq uniquement
+    - gemini  : Gemini uniquement
+    - prefer_powerful=True : Gemini d'abord si disponible (pour effectifs 48 nations, etc.)
+    """
+    groq_model   = GROQ_MODEL_FAST if fast else GROQ_MODEL
+    gemini_model = GEMINI_MODEL_FAST if fast else GEMINI_MODEL
+
+    provider = AI_PROVIDER
+
+    # Si tâche lourde ET Gemini disponible, on le préfère même en mode "auto"
+    if prefer_powerful and GEMINI_API_KEY and provider == "auto":
+        provider = "gemini_first"
+
+    if provider == "groq":
+        result = await _groq_chat(messages, model=groq_model, max_tokens=max_tokens, temperature=temperature)
+        if not result:
+            logger.warning("Groq indisponible — aucun fallback configuré (AI_PROVIDER=groq)")
+        return result
+
+    if provider == "gemini":
+        result = await _gemini_chat(messages, model=gemini_model, max_tokens=max_tokens, temperature=temperature)
+        if not result:
+            logger.warning("Gemini indisponible — aucun fallback configuré (AI_PROVIDER=gemini)")
+        return result
+
+    if provider == "gemini_first":
+        # Gemini d'abord (tâche lourde), Groq en fallback
+        result = await _gemini_chat(messages, model=gemini_model, max_tokens=max_tokens, temperature=temperature)
+        if result:
+            logger.info("IA: Gemini (tâche complexe)")
+            return result
+        logger.warning("Gemini échoué → fallback Groq")
+        result = await _groq_chat(messages, model=groq_model, max_tokens=max_tokens, temperature=temperature)
+        if result:
+            logger.info("IA: Groq (fallback depuis Gemini)")
+        return result
+
+    # auto (défaut) : Groq d'abord, Gemini en fallback
+    if GROQ_API_KEY:
+        result = await _groq_chat(messages, model=groq_model, max_tokens=max_tokens, temperature=temperature)
+        if result:
+            logger.debug("IA: Groq")
+            return result
+        logger.warning("Groq échoué → fallback Gemini")
+
+    if GEMINI_API_KEY:
+        result = await _gemini_chat(messages, model=gemini_model, max_tokens=max_tokens, temperature=temperature)
+        if result:
+            logger.info("IA: Gemini (fallback)")
+        return result
+
+    logger.error("Aucune clé IA disponible (GROQ_API_KEY et GEMINI_API_KEY absentes)")
     return None
 
 
@@ -104,20 +249,17 @@ def _extract_json(text: str) -> Optional[Any]:
     """Extrait JSON depuis une réponse texte (résiste aux balises markdown)."""
     if not text:
         return None
-    # Essai direct
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Chercher dans blocs ```json ... ```
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if match:
         try:
             return json.loads(match.group(1).strip())
         except json.JSONDecodeError:
             pass
-    # Chercher premier { ... } ou [ ... ]
     match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
     if match:
         try:
@@ -128,13 +270,12 @@ def _extract_json(text: str) -> Optional[Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MODULE 1 : MATCHS & RÉSULTATS (FIFA officiel)
+#  MODULE 1 : MATCHS & RÉSULTATS
 # ══════════════════════════════════════════════════════════════════════════════
 
 PROMPT_MATCHS_SYSTEM = """Tu es un expert en données football FIFA Coupe du Monde 2026.
 Tu connais le calendrier officiel CDM 2026 (11 juin – 19 juillet 2026, USA/Canada/Mexique).
 48 équipes, 12 groupes de 4 (A à L), puis phases éliminatoires.
-
 Retourne UNIQUEMENT un JSON valide, sans texte autour, sans markdown.
 """
 
@@ -159,7 +300,6 @@ Pour chaque match donne :
     }
   ]
 }
-
 Utilise les vraies dates du calendrier FIFA 2026 officiel.
 Phase de groupes : 11 juin au 2 juillet.
 Huitièmes : 5-8 juillet. Quarts : 11-12 juillet. Demies : 15-16 juillet.
@@ -168,7 +308,7 @@ Finale : 19 juillet 2026, New York/New Jersey.
 
 PROMPT_RESULTATS_SYSTEM = """Tu es un expert en résultats football temps réel.
 Date actuelle : {today}.
-Tu dois chercher les derniers résultats officiels de la CDM 2026 sur FIFA.com et Sofascore.
+Tu dois chercher les derniers résultats officiels de la CDM 2026.
 """
 
 PROMPT_RESULTATS_USER = """Donne-moi les résultats des matchs CDM 2026 qui se sont terminés récemment.
@@ -206,24 +346,24 @@ Si aucun match n'est terminé encore, retourne {"results": []}.
 
 
 async def scraper_matchs_calendrier() -> list[dict]:
-    """Génère le calendrier complet CDM 2026 via Groq."""
+    """Génère le calendrier complet CDM 2026 via IA."""
     cached = _cache_get("matchs_calendrier")
     if cached:
         return cached
 
-    logger.info("🗓️  Génération calendrier CDM 2026 via Groq...")
-    text = await _groq_chat(
+    logger.info("🗓️  Génération calendrier CDM 2026 via IA...")
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_MATCHS_SYSTEM},
             {"role": "user",   "content": PROMPT_MATCHS_USER},
         ],
         max_tokens=8192,
+        prefer_powerful=True,   # 104 matchs = tâche lourde → Gemini si dispo
     )
 
     data = _extract_json(text or "")
     matchs = data.get("matches", []) if isinstance(data, dict) else []
 
-    # Fallback : calendrier minimal si Groq indisponible
     if not matchs:
         matchs = _calendrier_fallback()
 
@@ -233,15 +373,15 @@ async def scraper_matchs_calendrier() -> list[dict]:
 
 
 async def scraper_resultats_recents() -> list[dict]:
-    """Récupère les résultats récents via Groq."""
+    """Récupère les résultats récents via IA."""
     cached = _cache_get("resultats_recents")
     if cached:
         return cached
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    logger.info("📡 Scraping résultats récents via Groq...")
+    logger.info("📡 Scraping résultats récents via IA...")
 
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_RESULTATS_SYSTEM.format(today=today)},
             {"role": "user",   "content": PROMPT_RESULTATS_USER},
@@ -274,7 +414,7 @@ Format JSON strict :
   "squads": [
     {
       "nation": "France",
-      "group": "E",
+      "group": "I",
       "coach_name": "Didier Deschamps",
       "coach_nationality": "Française",
       "coach_price": 8.0,
@@ -306,19 +446,19 @@ Format JSON : même structure que précédemment pour une seule nation.
 
 
 async def scraper_effectifs_tous() -> list[dict]:
-    """Récupère les effectifs des 48 nations."""
+    """Récupère les effectifs des 48 nations. Utilise Gemini si dispo (tâche lourde)."""
     cached = _cache_get("effectifs_tous")
     if cached:
         return cached
 
-    logger.info("🌍 Scraping effectifs 48 nations via Groq...")
-    text = await _groq_chat(
+    logger.info("🌍 Scraping effectifs 48 nations via IA...")
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_EFFECTIFS_SYSTEM},
             {"role": "user",   "content": PROMPT_EFFECTIFS_USER},
         ],
         max_tokens=8192,
-        model=GROQ_MODEL,
+        prefer_powerful=True,   # 48 nations = tâche lourde → Gemini préféré
     )
 
     data = _extract_json(text or "")
@@ -335,18 +475,18 @@ async def scraper_effectifs_tous() -> list[dict]:
 
 async def scraper_effectif_nation(nation: str) -> Optional[dict]:
     """Récupère l'effectif d'une nation spécifique."""
-    cache_key = f"effectif_{nation.lower()}"
+    cache_key = f"effectif_{nation.lower().replace(' ', '_')}"
     cached = _cache_get(cache_key)
     if cached:
         return cached
 
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_EFFECTIFS_SYSTEM},
             {"role": "user",   "content": PROMPT_EFFECTIF_NATION_USER.format(nation=nation)},
         ],
         max_tokens=3000,
-        model=GROQ_MODEL_FAST,
+        fast=True,
     )
 
     data = _extract_json(text or "")
@@ -364,23 +504,22 @@ async def scraper_effectif_nation(nation: str) -> Optional[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 PROMPT_STATS_SYSTEM = """Tu es un analyste football qui extrait les statistiques officielles
-des matchs de la CDM 2026. Tu utilises les données de Sofascore et FIFA.
-Retourne UNIQUEMENT du JSON valide.
+des matchs de la CDM 2026. Retourne UNIQUEMENT du JSON valide.
 """
 
 PROMPT_STATS_USER = """Extrais les statistiques détaillées du match {home} vs {away}
 du {date} (CDM 2026).
 
 Format JSON strict :
-{
-  "match": {
+{{
+  "match": {{
     "home": "{home}",
     "away": "{away}",
     "home_score": 0,
     "away_score": 0,
     "status": "finished",
     "player_stats": [
-      {
+      {{
         "player_name": "Prénom Nom",
         "team": "Pays",
         "minutes_played": 90,
@@ -392,10 +531,10 @@ Format JSON strict :
         "ball_recoveries": 0,
         "clean_sheet": false,
         "position": "G|D|M|A"
-      }
+      }}
     ]
-  }
-}
+  }}
+}}
 """
 
 
@@ -407,12 +546,10 @@ async def scraper_stats_match(home: str, away: str, date: str) -> Optional[dict]
         return cached
 
     logger.info(f"📊 Scraping stats {home} vs {away}...")
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_STATS_SYSTEM},
-            {"role": "user",   "content": PROMPT_STATS_USER.format(
-                home=home, away=away, date=date
-            )},
+            {"role": "user",   "content": PROMPT_STATS_USER.format(home=home, away=away, date=date)},
         ],
         max_tokens=3000,
     )
@@ -471,9 +608,7 @@ async def auto_fill_equipe(
     players_disponibles: list[dict],
     coaches_disponibles: list[dict],
 ) -> Optional[dict]:
-    """Génère une équipe Fantasy optimale via Groq."""
-
-    # Préparer un échantillon représentatif
+    """Génère une équipe Fantasy optimale via IA."""
     sample_players = players_disponibles[:60] if len(players_disponibles) > 60 else players_disponibles
     players_text = "\n".join(
         f"ID:{p['id']} {p['name']} ({p['position']}) {p.get('nationality','')} {p.get('price',6)}M€"
@@ -484,7 +619,7 @@ async def auto_fill_equipe(
         for c in coaches_disponibles[:20]
     )
 
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_AUTOFILL_SYSTEM},
             {"role": "user",   "content": PROMPT_AUTOFILL_USER.format(
@@ -515,30 +650,19 @@ JOUEURS par poste (G=Gardien, D=Défenseur, M=Milieu, A=Attaquant) :
 - Clean sheet (0 but encaissé) : G=+5, D=+4, M=+1, A=0
 - 3 parades ou plus (gardien) : +3 pts par tranche de 3
 - 5 récupérations ou plus (G,D,M) : +3 pts par tranche de 5
-- Carton jaune : -1 pt
-- Carton rouge : -2 pts
+- Carton jaune : -1 pt / Carton rouge : -2 pts
 
 ENTRAÎNEUR :
 - Présent sur le banc : +1 pt
 - Victoire : +2 pts de base
-- Chaque tranche de 2 buts d'écart en victoire : +3 pts (ex: 4-0 = +6 bonus)
-- Défaite : -2 pts de base, -3 pts par tranche de 2 buts d'écart
-- But d'un remplaçant : +3 pts
-- Passe d'un remplaçant : +2 pts
-
-PRONOSTICS :
-- Score exact : +5 pts
-- Bonne issue (V/N/D correct mais score différent) : +2 pts
-- Mauvaise issue : 0 pt
-
-TABLEAU (bracket) :
-- Bonne prédiction rang de groupe : +5 pts par équipe
-- Bonne équipe en phase élim : +5 pts par match
+- Chaque tranche de 2 buts d'écart en victoire : +3 pts
+- Défaite : -2 pts de base
+- But d'un remplaçant : +3 pts / Passe d'un remplaçant : +2 pts
 
 Retourne UNIQUEMENT du JSON valide.
 """
 
-PROMPT_POINTS_USER = """Calcule les points Fantasy pour ce joueur/entraîneur :
+PROMPT_POINTS_USER = """Calcule les points Fantasy pour :
 
 Entité : {name} ({type})
 Poste : {position}
@@ -550,16 +674,7 @@ Retourne :
   "name": "{name}",
   "type": "{type}",
   "position": "{position}",
-  "detail": {{
-    "temps_de_jeu": 0,
-    "buts": 0,
-    "passes": 0,
-    "clean_sheet": 0,
-    "parades": 0,
-    "recups": 0,
-    "cartons": 0,
-    "coaching": 0
-  }},
+  "detail": {{"temps_de_jeu": 0, "buts": 0, "passes": 0, "clean_sheet": 0, "parades": 0, "recups": 0, "cartons": 0, "coaching": 0}},
   "total": 0,
   "explanation": "Détail du calcul"
 }}
@@ -568,28 +683,23 @@ Retourne :
 
 async def calculer_points_ia(
     name: str,
-    entity_type: str,  # "player" | "coach"
+    entity_type: str,
     position: str,
     stats: dict,
 ) -> Optional[dict]:
-    """Calcule les points Fantasy via Groq IA (validation + explication)."""
+    """Calcule les points Fantasy via IA (validation + explication)."""
     stats_text = json.dumps(stats, ensure_ascii=False)
-
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_POINTS_SYSTEM},
             {"role": "user",   "content": PROMPT_POINTS_USER.format(
-                name=name,
-                type=entity_type,
-                position=position,
-                stats=stats_text,
+                name=name, type=entity_type, position=position, stats=stats_text,
             )},
         ],
         max_tokens=800,
-        model=GROQ_MODEL_FAST,
+        fast=True,
         temperature=0.0,
     )
-
     return _extract_json(text or "")
 
 
@@ -599,17 +709,6 @@ async def calculer_points_ia(
 
 PROMPT_PLAINTE_SYSTEM = """Tu es l'administrateur IA de la ligue privée Fantasy Boulzazen CDM 2026.
 Tu analyses les réclamations des joueurs avec impartialité et précision.
-
-Barème officiel :
-- But : G=8, D=6, M=5, A=4 pts
-- Passe : G=6, D=5, M=4, A=4 pts
-- Clean sheet : G=5, D=4, M=1, A=0 pts
-- Match complet : +2, partiel : +1
-- Parades (par 3) : +3 pts (gardiens)
-- Récupérations (par 5) : +3 pts (G,D,M)
-- CJ : -1, CR : -2
-- Entraîneur présent : +1, victoire : +2, +3/2 buts d'écart
-
 Retourne UNIQUEMENT du JSON valide.
 """
 
@@ -639,8 +738,8 @@ async def analyser_plainte_ia(
     description: str,
     claimed_points: str = "non précisé",
 ) -> Optional[dict]:
-    """Analyse une réclamation Fantasy via Groq IA."""
-    text = await _groq_chat(
+    """Analyse une réclamation Fantasy via IA."""
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": PROMPT_PLAINTE_SYSTEM},
             {"role": "user",   "content": PROMPT_PLAINTE_USER.format(
@@ -651,15 +750,14 @@ async def analyser_plainte_ia(
             )},
         ],
         max_tokens=600,
-        model=GROQ_MODEL_FAST,
+        fast=True,
         temperature=0.2,
     )
-
     return _extract_json(text or "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MODULE 7 : CLASSEMENTS GROUPES IA
+#  MODULE 7 : CLASSEMENTS GROUPES
 # ══════════════════════════════════════════════════════════════════════════════
 
 PROMPT_CLASSEMENTS_USER = """Donne-moi les classements actuels de tous les groupes (A à L)
@@ -688,13 +786,13 @@ async def scraper_classements_groupes() -> dict:
     if cached:
         return cached
 
-    text = await _groq_chat(
+    text = await _ai_chat(
         messages=[
             {"role": "system", "content": "Tu es expert CDM 2026. JSON uniquement."},
             {"role": "user",   "content": PROMPT_CLASSEMENTS_USER},
         ],
         max_tokens=4096,
-        model=GROQ_MODEL_FAST,
+        fast=True,
     )
 
     data = _extract_json(text or "")
@@ -710,17 +808,10 @@ async def scraper_classements_groupes() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scraping_complet(db=None) -> dict[str, Any]:
-    """
-    Lance le scraping complet en parallèle :
-    - Calendrier matchs
-    - Résultats récents
-    - Classements groupes
-    - Effectifs (en arrière-plan, plus long)
-    """
-    logger.info("🚀 Scraping complet CDM 2026 démarré...")
+    """Pipeline complet : calendrier + résultats + classements."""
+    logger.info(f"🚀 Scraping complet CDM 2026 — moteur : {_get_active_provider_name()}")
     debut = time.time()
 
-    # Tâches parallèles prioritaires
     resultats_task, classements_task, matchs_task = await asyncio.gather(
         scraper_resultats_recents(),
         scraper_classements_groupes(),
@@ -728,11 +819,10 @@ async def scraping_complet(db=None) -> dict[str, Any]:
         return_exceptions=True,
     )
 
-    matchs     = matchs_task      if isinstance(matchs_task, list)      else []
-    resultats  = resultats_task   if isinstance(resultats_task, list)    else []
-    classements= classements_task if isinstance(classements_task, dict)  else {}
+    matchs      = matchs_task      if isinstance(matchs_task, list)      else []
+    resultats   = resultats_task   if isinstance(resultats_task, list)    else []
+    classements = classements_task if isinstance(classements_task, dict)  else {}
 
-    # Fusionner résultats dans les matchs
     if resultats:
         matchs_index = {m["id"]: m for m in matchs}
         for res in resultats:
@@ -753,38 +843,37 @@ async def scraping_complet(db=None) -> dict[str, Any]:
     return {
         "matchs":      matchs,
         "classements": classements,
-        "effectifs":   [],   # chargés séparément à la demande
+        "effectifs":   [],
         "resume": {
-            "matchs_scraped":   len(matchs),
+            "matchs_scraped":     len(matchs),
             "resultats_nouveaux": len(resultats),
-            "groupes":          len(classements),
-            "duree_secondes":   duree,
+            "groupes":            len(classements),
+            "duree_secondes":     duree,
+            "moteur_ia":          _get_active_provider_name(),
         },
     }
 
 
 async def close_browser() -> None:
-    """Compatibilité avec l'ancien code — rien à fermer ici."""
     pass
 
 
 async def get_all_players_market() -> list[dict]:
-    """Retourne tous les joueurs du marché (pour l'auto-fill)."""
     squads = await scraper_effectifs_tous()
     players = []
     pid = 1
     for squad in squads:
         for player in squad.get("players", []):
             players.append({
-                "id":          pid,
-                "name":        player.get("name", ""),
-                "position":    player.get("position", "M"),
-                "nationality": squad.get("nation", ""),
-                "price":       float(player.get("price", 6.0)),
-                "club":        player.get("club", ""),
+                "id":           pid,
+                "name":         player.get("name", ""),
+                "position":     player.get("position", "M"),
+                "nationality":  squad.get("nation", ""),
+                "price":        float(player.get("price", 6.0)),
+                "club":         player.get("club", ""),
                 "is_confirmed": True,
-                "goals":       0,
-                "assists":     0,
+                "goals":        0,
+                "assists":      0,
                 "points_total": 0,
             })
             pid += 1
@@ -792,42 +881,19 @@ async def get_all_players_market() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CALENDRIER FALLBACK (si Groq indisponible)
+#  CALENDRIER FALLBACK (si aucune IA disponible)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _calendrier_fallback() -> list[dict]:
-    """Calendrier minimal CDM 2026 codé en dur pour le fallback."""
-    groupes = {
-        
-    }
-    # Dates approximatives
     from datetime import date, timedelta
     start = date(2026, 6, 11)
     matchs = []
     mid = 1
-    day_offset = 0
-    for groupe, pairs in groupes.items():
-        for i, (home, away) in enumerate(pairs):
-            round_num = i // 2 + 1
-            match_date = (start + timedelta(days=day_offset + i)).isoformat()
-            matchs.append({
-                "id": f"G{groupe}{mid}",
-                "home": home, "away": away,
-                "group": f"Groupe {groupe}",
-                "round": "group_stage",
-                "date": match_date,
-                "venue": "USA",
-                "home_score": None, "away_score": None,
-                "status": "scheduled",
-                "is_finished": False, "is_locked": False,
-                "display_order": mid,
-            })
-            mid += 1
-        day_offset += 3
-
-    # Phases élim (TBD)
-    for round_name, label, count in [("r16","R16",16), ("qf","QF",8), ("sf","SF",4), ("third_place","3P",2), ("final","FIN",1)]:
-        for i in range(count // 2 if round_name != "final" else 1):
+    for round_name, label, count in [
+        ("r16","R16",16), ("qf","QF",8),
+        ("sf","SF",4), ("third_place","3P",1), ("final","FIN",1)
+    ]:
+        for i in range(count // 2 if round_name not in ("final","third_place") else 1):
             matchs.append({
                 "id": f"{round_name}_{i+1}",
                 "home": "TBD", "away": "TBD",
@@ -839,5 +905,4 @@ def _calendrier_fallback() -> list[dict]:
                 "display_order": mid,
             })
             mid += 1
-
     return matchs
