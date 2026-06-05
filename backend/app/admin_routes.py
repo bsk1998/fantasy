@@ -1,28 +1,24 @@
 """
 admin_routes.py — Routes d'administration
 ===========================================
-+ Suppression de comptes utilisateurs
-+ Création / gestion de la Ligue Générale
+v3.0 — Corrections :
+  ✅ Imports complets (UploadFile, File, Body, Union, Optional)
+  ✅ Instance ai_service centralisée
+  ✅ inject_team_nation importé depuis admin_services
+  ✅ Endpoint /ai/effectif fonctionnel (texte + image)
+  ✅ Endpoint /squad/inject corrigé
 """
 
 import logging
 import secrets
-from fastapi import APIRouter, HTTPException, Header, Depends, Query
+from fastapi import APIRouter, HTTPException, Header, Depends, Query, UploadFile, File, Body
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 
 from app.admin_auth import verify_admin_credentials, generate_admin_token, verify_admin_token
-from app.admin_services import (
-    parse_squad_list,
-    estimate_player_prices,
-    parse_tournament_data,
-    parse_coach_data,
-    parse_rules,
-)
-from app.models import (
-    Player, Coach, TeamNation, MatchResult, User, League, user_league,
-)
+from app.admin_services import inject_team_nation
+from app.models import Player, Coach, TeamNation, MatchResult, User, League
 from app.admin_models import AdminLog, AdminGameRule, AdminPricingTemplate
 from app.database import SessionLocal
 
@@ -30,8 +26,18 @@ logger = logging.getLogger("admin_routes")
 
 router = APIRouter(tags=["admin"])
 
+# ── Instance IA centralisée ───────────────────────────────────────────────────
+try:
+    from app.services.ai_service import AIService
+    ai_service = AIService()
+    AI_ROUTES_AVAILABLE = True
+except ImportError as _e:
+    AI_ROUTES_AVAILABLE = False
+    ai_service = None
+    logger.warning("ai_service non disponible : %s", _e)
+
 # ════════════════════════════════════════════════════════════════════════
-#  Modèles Pydantic
+#  MODÈLES PYDANTIC
 # ════════════════════════════════════════════════════════════════════════
 
 class AdminLoginRequest(BaseModel):
@@ -43,27 +49,14 @@ class AdminLoginResponse(BaseModel):
     token_type: str = "bearer"
     message: str
 
-# Définition des modèles pour le nouveau endpoint IA universel
-class AIParseRequest(BaseModel):
-    nation: Optional[str] = None # Nation suggérée, utile pour le prompt
-    raw_text: Optional[str] = None # Texte brut à parser
-    raw_image_b64: Optional[str] = None # Image en base64 à parser
-
 class AIParseResponse(BaseModel):
     status: str
     message: str
     parsed_data: Optional[Dict] = None
 
-
-# Ces classes sont maintenues pour compatibilité ou pour des usages spécifiques
 class SquadInjectionRequest(BaseModel):
     nation: str
     raw_squad_text: str
-
-class SquadInjectionResponse(BaseModel):
-    status: str
-    message: str
-    parsed_data: Optional[Dict] = None
 
 class PricingRequest(BaseModel):
     squad_data: Dict[str, Any]
@@ -85,7 +78,7 @@ class RulesParseRequest(BaseModel):
     raw_rules_text: str
 
 # ════════════════════════════════════════════════════════════════════════
-#  Dépendances
+#  DÉPENDANCES
 # ════════════════════════════════════════════════════════════════════════
 
 async def verify_admin(authorization: Optional[str] = Header(None)) -> dict:
@@ -137,7 +130,6 @@ async def admin_status(admin: dict = Depends(verify_admin)):
 
 @router.get("/users")
 async def list_users(admin: dict = Depends(verify_admin)):
-    """Liste tous les comptes utilisateurs avec leurs scores."""
     db = SessionLocal()
     try:
         users = db.query(User).order_by(User.id).all()
@@ -169,21 +161,14 @@ async def list_users(admin: dict = Depends(verify_admin)):
 
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
-    """
-    Supprime définitivement un compte utilisateur et toutes ses données
-    (roster, prédictions, plaintes, membres de ligue).
-    """
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(404, f"Utilisateur #{user_id} introuvable")
-
         username = user.username or user.email
         _log_action("user_deleted", "user", target_id=str(user_id), details=username)
-
         from sqlalchemy import text as sql_text
-
         db.execute(sql_text("DELETE FROM prediction_scores WHERE user_id = :uid"),    {"uid": user_id})
         db.execute(sql_text("DELETE FROM prediction_tableaux WHERE user_id = :uid"),  {"uid": user_id})
         db.execute(sql_text("DELETE FROM prediction_annexes WHERE user_id = :uid"),   {"uid": user_id})
@@ -193,7 +178,6 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
         db.execute(sql_text("DELETE FROM user_league WHERE user_id = :uid"),          {"uid": user_id})
         db.delete(user)
         db.commit()
-
         return {"status": "success", "message": f"✅ Compte {username} supprimé définitivement."}
     except HTTPException:
         raise
@@ -211,14 +195,9 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
 
 @router.post("/leagues/general")
 async def create_general_league(admin: dict = Depends(verify_admin)):
-    """
-    Crée (ou réactive) la Ligue Générale Boulzazen.
-    Tous les utilisateurs inscrits sont automatiquement ajoutés.
-    """
     db = SessionLocal()
     try:
         league = db.query(League).filter(League.name == "Ligue Générale Boulzazen").first()
-
         if not league:
             invite_code = secrets.token_hex(4).upper()
             league = League(
@@ -230,7 +209,6 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
             )
             db.add(league)
             db.flush()
-
         all_users = db.query(User).all()
         already_member_ids = {u.id for u in league.members}
         added = 0
@@ -238,13 +216,10 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
             if u.id not in already_member_ids:
                 league.members.append(u)
                 added += 1
-
         db.commit()
         db.refresh(league)
-
         _log_action("general_league_created", "league", target_id=str(league.id),
                     details=f"{len(league.members)} membres")
-
         return {
             "status":       "success",
             "message":      f"✅ Ligue Générale créée/mise à jour — {len(league.members)} membres, {added} ajoutés.",
@@ -262,35 +237,22 @@ async def create_general_league(admin: dict = Depends(verify_admin)):
 
 @router.get("/leagues/general")
 async def get_general_league_ranking(admin: dict = Depends(verify_admin)):
-    """
-    Retourne le classement de la Ligue Générale.
-    """
     db = SessionLocal()
     try:
         league = db.query(League).filter(League.name == "Ligue Générale Boulzazen").first()
         if not league:
-            return {
-                "status":  "not_found",
-                "message": "La Ligue Générale n'existe pas encore. Créez-la d'abord.",
-                "members": [],
-            }
+            return {"status": "not_found", "message": "La Ligue Générale n'existe pas encore.", "members": []}
 
         members_data = []
         for u in league.members:
-            fantasy   = u.score_fantasy or 0
-            scores    = u.score_predictor_scores or 0
-            bracket   = u.score_predictor_tableaux or 0
-            annexes   = u.score_top_individuel or 0
-            total     = fantasy + scores + bracket + annexes
+            fantasy  = u.score_fantasy or 0
+            scores   = u.score_predictor_scores or 0
+            bracket  = u.score_predictor_tableaux or 0
+            annexes  = u.score_top_individuel or 0
+            total    = fantasy + scores + bracket + annexes
             members_data.append({
-                "id":       u.id,
-                "username": u.username or u.email,
-                "email":    u.email,
-                "fantasy":  fantasy,
-                "scores":   scores,
-                "bracket":  bracket,
-                "annexes":  annexes,
-                "total":    total,
+                "id": u.id, "username": u.username or u.email, "email": u.email,
+                "fantasy": fantasy, "scores": scores, "bracket": bracket, "annexes": annexes, "total": total,
             })
 
         def ranked(entries, key):
@@ -299,22 +261,16 @@ async def get_general_league_ranking(admin: dict = Depends(verify_admin)):
                 e[f"rank_{key}"] = i + 1
             return sorted_entries
 
-        global_ranking  = ranked([dict(m) for m in members_data], "total")
-        fantasy_ranking = ranked([dict(m) for m in members_data], "fantasy")
-        scores_ranking  = ranked([dict(m) for m in members_data], "scores")
-        bracket_ranking = ranked([dict(m) for m in members_data], "bracket")
-        annexes_ranking = ranked([dict(m) for m in members_data], "annexes")
-
         return {
             "status":          "success",
             "league_id":       league.id,
             "invite_code":     league.invite_code,
             "member_count":    len(members_data),
-            "global_ranking":  global_ranking,
-            "fantasy_ranking": fantasy_ranking,
-            "scores_ranking":  scores_ranking,
-            "bracket_ranking": bracket_ranking,
-            "annexes_ranking": annexes_ranking,
+            "global_ranking":  ranked([dict(m) for m in members_data], "total"),
+            "fantasy_ranking": ranked([dict(m) for m in members_data], "fantasy"),
+            "scores_ranking":  ranked([dict(m) for m in members_data], "scores"),
+            "bracket_ranking": ranked([dict(m) for m in members_data], "bracket"),
+            "annexes_ranking": ranked([dict(m) for m in members_data], "annexes"),
         }
     except Exception as e:
         logger.error(f"get_general_league_ranking error : {e}")
@@ -325,13 +281,11 @@ async def get_general_league_ranking(admin: dict = Depends(verify_admin)):
 
 @router.post("/leagues/general/sync")
 async def sync_general_league(admin: dict = Depends(verify_admin)):
-    """Ajoute les nouveaux inscrits à la Ligue Générale existante."""
     db = SessionLocal()
     try:
         league = db.query(League).filter(League.name == "Ligue Générale Boulzazen").first()
         if not league:
-            raise HTTPException(404, "La Ligue Générale n'existe pas encore. Créez-la d'abord.")
-
+            raise HTTPException(404, "La Ligue Générale n'existe pas encore.")
         all_users = db.query(User).all()
         already_member_ids = {u.id for u in league.members}
         added = 0
@@ -340,12 +294,7 @@ async def sync_general_league(admin: dict = Depends(verify_admin)):
                 league.members.append(u)
                 added += 1
         db.commit()
-
-        return {
-            "status":  "success",
-            "message": f"✅ {added} nouveaux membres ajoutés à la Ligue Générale.",
-            "total":   len(league.members),
-        }
+        return {"status": "success", "message": f"✅ {added} nouveaux membres ajoutés.", "total": len(league.members)}
     except HTTPException:
         raise
     except Exception as e:
@@ -356,67 +305,99 @@ async def sync_general_league(admin: dict = Depends(verify_admin)):
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  ENDPOINT IA UNIVERSEL (Phase 2)
+#  ENDPOINT IA UNIVERSEL — POST /ai/effectif
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/ai/effectif", response_model=AIParseResponse)
 async def ai_effectif(
-    nation: Optional[str] = Query(None, description="Nation suggérée pour le parsing"),
-    raw_text: Optional[str] = None, # Pour le prompt direct (JSON body)
-    file: UploadFile = File(None),  # Pour l'upload d'image (multipart/form-data)
-    admin: dict = Depends(verify_admin)
+    nation: Optional[str] = Query(None, description="Nation suggérée"),
+    raw_text: Optional[str] = Query(None, description="Texte brut"),
+    file: Optional[UploadFile] = File(None),
+    admin: dict = Depends(verify_admin),
 ):
     """
-    Endpoint universel pour le parsing d'effectif par IA.
-    Peut prendre du texte brut ou une image en base64/upload.
+    Endpoint universel IA pour le parsing d'effectif.
+    Accepte :
+      - Un fichier image (multipart/form-data, champ 'file')
+      - Du texte via query param 'raw_text'
+    
+    L'IA détecte automatiquement le pays si non fourni via 'nation'.
     """
-    if not ai_service.ai_available or not (ai_service.groq_configured or ai_service.gemini_configured):
-        raise HTTPException(status_code=503, detail="Moteur IA non disponible ou non configuré.")
+    if not AI_ROUTES_AVAILABLE or ai_service is None:
+        raise HTTPException(503, "Moteur IA non disponible (vérifiez l'import de ai_service).")
 
+    if not (ai_service.groq_configured or ai_service.gemini_configured):
+        raise HTTPException(503, "Aucune clé IA configurée (GROQ_API_KEY ou GEMINI_API_KEY dans .env).")
+
+    # ── Lire l'input ────────────────────────────────────────────────────
     raw_input: Optional[Union[str, bytes]] = None
-    if file:
-        raw_input = await file.read() # Bytes for image
-    elif raw_text:
-        raw_input = raw_text # String for text
 
-    if not raw_input:
-        raise HTTPException(status_code=400, detail="Fournissez soit un 'file' (image) soit un 'raw_text'.")
+    if file and file.filename:
+        # Image uploadée
+        content_type = file.content_type or ""
+        if not content_type.startswith("image/"):
+            raise HTTPException(400, f"Type de fichier non supporté : {content_type}. Envoyez une image.")
+        raw_input = await file.read()
+        logger.info("ai_effectif: image reçue (%s, %d octets)", file.filename, len(raw_input))
+    elif raw_text and raw_text.strip():
+        raw_input = raw_text.strip()
+        logger.info("ai_effectif: texte reçu (%d caractères)", len(raw_input))
+    else:
+        raise HTTPException(400, "Fournissez soit 'file' (image) soit 'raw_text' (texte).")
 
-    # Si l'input est une image, le ai_service gérera la conversion et l'envoi au modèle vision
-    # Sinon, il sera traité comme du texte.
-    parsed_data, msg = await ai_service.parse_squad_list(raw_input)
+    # ── Appel IA ─────────────────────────────────────────────────────────
+    try:
+        parsed_data, msg = await ai_service.parse_squad_list(raw_input)
+    except Exception as exc:
+        logger.exception("ai_effectif: erreur parse_squad_list")
+        raise HTTPException(500, f"Erreur IA : {exc}")
 
     if not parsed_data:
         _log_action("ai_effectif_parse_failed", "ai_squad", target_id=nation or "N/A", details=msg)
         return AIParseResponse(status="error", message=msg)
 
-    # Si nation est fournie dans la requête, et que l'IA n'a pas détecté de nation, on la force
+    # Forcer la nation si fournie et non détectée
     if nation and not parsed_data.get("nation"):
         parsed_data["nation"] = nation
 
-    _log_action("ai_effectif_parse_success", "ai_squad", target_id=parsed_data.get("nation", "N/A"), details=msg)
+    _log_action("ai_effectif_parse_success", "ai_squad",
+                target_id=parsed_data.get("nation", "N/A"), details=msg)
     return AIParseResponse(status="success", message=msg, parsed_data=parsed_data)
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  INJECTION EFFECTIFS (MàJ pour utiliser la fonction d'injection)
+#  INJECTION EFFECTIFS — POST /squad/inject
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/squad/inject")
 async def inject_squad(
     nation: str = Query(..., description="Nom du pays"),
     coach_name: Optional[str] = Query(None),
-    players_data: List[Dict] = Body(..., description="Liste des joueurs à injecter"), # Ajout de players_data
+    players_data: List[Dict] = Body(..., description="Liste des joueurs"),
     admin: dict = Depends(verify_admin),
 ):
+    """
+    Injecte l'effectif d'une nation en base.
+    - Supprime les anciens joueurs de l'équipe
+    - Insère les nouveaux joueurs (avec normalisation des positions)
+    - Crée/met à jour l'entraîneur si fourni
+    """
+    if not nation.strip():
+        raise HTTPException(400, "Le nom de la nation est obligatoire.")
+    if not players_data or len(players_data) < 3:
+        raise HTTPException(400, "Minimum 3 joueurs requis.")
+
     db = SessionLocal()
     try:
-        # Appelle la fonction d'injection centralisée
-        inject_team_nation(db, nation, coach_name, players_data)
-
-        msg = f"✅ Squad {nation} injectée avec {len(players_data)} joueurs et l'entraîneur {coach_name or 'N/A'}."
+        result = inject_team_nation(db, nation.strip(), coach_name, players_data)
+        msg = (
+            f"✅ Effectif {nation} injecté : "
+            f"{result['players_inserted']} joueurs"
+            + (f", entraîneur : {result['coach']}" if result["coach"] else "")
+            + f" ({result['players_deleted']} anciens supprimés)"
+        )
         _log_action("squad_injected", "team", target_id=nation, details=msg)
-        return {"status": "success", "message": msg, "nation": nation}
+        return {"status": "success", "message": msg, **result}
     except Exception as e:
         db.rollback()
         logger.error(f"inject_squad error: {e}")
@@ -425,8 +406,34 @@ async def inject_squad(
         db.close()
 
 
+@router.get("/squad/filled-nations")
+async def get_filled_nations(admin: dict = Depends(verify_admin)):
+    """Retourne les nations dont l'effectif est complet (joueurs + entraîneur)."""
+    db = SessionLocal()
+    try:
+        filled = []
+        nations = db.query(TeamNation).all()
+        for nation in nations:
+            has_players = db.query(Player).filter(
+                Player.nationality == nation.name, Player.is_confirmed == True
+            ).first()
+            has_coach = db.query(Coach).filter(
+                Coach.team_name == nation.name, Coach.is_confirmed == True
+            ).first()
+            if has_players and has_coach:
+                filled.append(nation.name)
+        return {"status": "success", "filled_nations": filled}
+    except Exception as e:
+        logger.error(f"get_filled_nations error: {e}")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
 @router.post("/squad/estimate-prices")
 async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admin)):
+    if not ai_service:
+        return {"status": "error", "message": "IA non disponible"}
     pricing_result, msg = await ai_service.estimate_player_prices(req.squad_data)
     if not pricing_result:
         _log_action("pricing_failed", "player", details=msg)
@@ -435,25 +442,9 @@ async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admi
     return {"status": "success", "message": msg, "pricing": pricing_result.get("pricing", [])}
 
 
-@router.get("/squad/filled-nations")
-async def get_filled_nations(admin: dict = Depends(verify_admin)):
-    """Retourne la liste des nations dont l'effectif (joueurs + entraîneur) est complet."""
-    db = SessionLocal()
-    try:
-        filled_nations_list = []
-        nations = db.query(TeamNation).all()
-        for nation in nations:
-            has_players = db.query(Player).filter(Player.nationality == nation.name, Player.is_confirmed == True).first()
-            has_coach = db.query(Coach).filter(Coach.nationality == nation.name, Coach.is_confirmed == True).first()
-            if has_players and has_coach:
-                filled_nations_list.append(nation.name)
-        return {"status": "success", "filled_nations": filled_nations_list}
-    except Exception as e:
-        logger.error(f"get_filled_nations error: {e}")
-        raise HTTPException(500, str(e))
-    finally:
-        db.close()
-
+# ════════════════════════════════════════════════════════════════════════
+#  JOUEURS
+# ════════════════════════════════════════════════════════════════════════
 
 @router.post("/player/add")
 async def add_player(
@@ -501,7 +492,7 @@ async def update_player(
         if club:     player.club     = club
         if price is not None: player.price = price
         db.commit()
-        _log_action("player_updated", "player", target_id=str(player_id), details=f"Prix: {price}")
+        _log_action("player_updated", "player", target_id=str(player_id))
         return {"status": "success", "message": f"✅ Joueur {player.name} modifié"}
     except Exception as e:
         db.rollback()
@@ -511,11 +502,13 @@ async def update_player(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  INJECTION TOURNOI (MàJ pour utiliser ai_service)
+#  TOURNOI
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/tournament/parse")
 async def parse_tournament(req: TournamentInjectionRequest, admin: dict = Depends(verify_admin)):
+    if not ai_service:
+        return {"status": "error", "message": "IA non disponible"}
     parsed, msg = await ai_service.parse_tournament_data(req.raw_tournament_text)
     if not parsed:
         return {"status": "error", "message": msg}
@@ -542,7 +535,7 @@ async def add_match(
         db.commit()
         _log_action("match_added", "match", target_id=f"{home}-{away}", details=match_date)
         return {"status": "success", "message": f"✅ Match {home} vs {away} ajouté",
-                "match": {"id": match_result.id, "home": match_result.home, "away": match_result.away, "date": match_result.date}}
+                "match": {"id": match_result.id, "home": match_result.home, "away": match_result.away}}
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
@@ -551,11 +544,13 @@ async def add_match(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  ENTRAÎNEUR (MàJ pour utiliser ai_service)
+#  ENTRAÎNEURS
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/coach/parse")
 async def parse_coach(req: CoachInjectionRequest, admin: dict = Depends(verify_admin)):
+    if not ai_service:
+        return {"status": "error", "message": "IA non disponible"}
     parsed, msg = await ai_service.parse_coach_data(req.raw_coach_text)
     if not parsed:
         return {"status": "error", "message": msg}
@@ -589,11 +584,13 @@ async def add_coach(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  RÈGLES (MàJ pour utiliser ai_service)
+#  RÈGLES
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/rules/parse")
 async def parse_rules_endpoint(req: RulesParseRequest, admin: dict = Depends(verify_admin)):
+    if not ai_service:
+        return {"status": "error", "message": "IA non disponible"}
     parsed, msg = await ai_service.parse_rules(req.raw_rules_text)
     if not parsed:
         return {"status": "error", "message": msg}
@@ -645,6 +642,10 @@ async def update_rule(req: RuleUpdateRequest, admin: dict = Depends(verify_admin
     finally:
         db.close()
 
+
+# ════════════════════════════════════════════════════════════════════════
+#  LOGS
+# ════════════════════════════════════════════════════════════════════════
 
 @router.get("/logs")
 async def get_logs(limit: int = Query(50), admin: dict = Depends(verify_admin)):
