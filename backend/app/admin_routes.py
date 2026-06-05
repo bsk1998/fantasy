@@ -43,6 +43,19 @@ class AdminLoginResponse(BaseModel):
     token_type: str = "bearer"
     message: str
 
+# Définition des modèles pour le nouveau endpoint IA universel
+class AIParseRequest(BaseModel):
+    nation: Optional[str] = None # Nation suggérée, utile pour le prompt
+    raw_text: Optional[str] = None # Texte brut à parser
+    raw_image_b64: Optional[str] = None # Image en base64 à parser
+
+class AIParseResponse(BaseModel):
+    status: str
+    message: str
+    parsed_data: Optional[Dict] = None
+
+
+# Ces classes sont maintenues pour compatibilité ou pour des usages spécifiques
 class SquadInjectionRequest(BaseModel):
     nation: str
     raw_squad_text: str
@@ -343,63 +356,83 @@ async def sync_general_league(admin: dict = Depends(verify_admin)):
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  INJECTION EFFECTIFS
+#  ENDPOINT IA UNIVERSEL (Phase 2)
 # ════════════════════════════════════════════════════════════════════════
 
-@router.post("/squad/parse", response_model=SquadInjectionResponse)
-async def parse_squad(req: SquadInjectionRequest, admin: dict = Depends(verify_admin)):
-    parsed, msg = await parse_squad_list(req.raw_squad_text)
-    if not parsed:
-        _log_action("squad_parse_failed", "player", target_id=req.nation, details=msg)
-        return SquadInjectionResponse(status="error", message=msg)
-    _log_action("squad_parse_success", "player", target_id=req.nation, details=msg)
-    return SquadInjectionResponse(status="success", message=msg, parsed_data=parsed)
+@router.post("/ai/effectif", response_model=AIParseResponse)
+async def ai_effectif(
+    nation: Optional[str] = Query(None, description="Nation suggérée pour le parsing"),
+    raw_text: Optional[str] = None, # Pour le prompt direct (JSON body)
+    file: UploadFile = File(None),  # Pour l'upload d'image (multipart/form-data)
+    admin: dict = Depends(verify_admin)
+):
+    """
+    Endpoint universel pour le parsing d'effectif par IA.
+    Peut prendre du texte brut ou une image en base64/upload.
+    """
+    if not ai_service.ai_available or not (ai_service.groq_configured or ai_service.gemini_configured):
+        raise HTTPException(status_code=503, detail="Moteur IA non disponible ou non configuré.")
+
+    raw_input: Optional[Union[str, bytes]] = None
+    if file:
+        raw_input = await file.read() # Bytes for image
+    elif raw_text:
+        raw_input = raw_text # String for text
+
+    if not raw_input:
+        raise HTTPException(status_code=400, detail="Fournissez soit un 'file' (image) soit un 'raw_text'.")
+
+    # Si l'input est une image, le ai_service gérera la conversion et l'envoi au modèle vision
+    # Sinon, il sera traité comme du texte.
+    parsed_data, msg = await ai_service.parse_squad_list(raw_input)
+
+    if not parsed_data:
+        _log_action("ai_effectif_parse_failed", "ai_squad", target_id=nation or "N/A", details=msg)
+        return AIParseResponse(status="error", message=msg)
+
+    # Si nation est fournie dans la requête, et que l'IA n'a pas détecté de nation, on la force
+    if nation and not parsed_data.get("nation"):
+        parsed_data["nation"] = nation
+
+    _log_action("ai_effectif_parse_success", "ai_squad", target_id=parsed_data.get("nation", "N/A"), details=msg)
+    return AIParseResponse(status="success", message=msg, parsed_data=parsed_data)
 
 
-@router.post("/squad/estimate-prices")
-async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admin)):
-    pricing_result, msg = await estimate_player_prices(req.squad_data)
-    if not pricing_result:
-        _log_action("pricing_failed", "player", details=msg)
-        return {"status": "error", "message": msg}
-    _log_action("pricing_success", "player", details=msg)
-    return {"status": "success", "message": msg, "pricing": pricing_result.get("pricing", [])}
-
+# ════════════════════════════════════════════════════════════════════════
+#  INJECTION EFFECTIFS (MàJ pour utiliser la fonction d'injection)
+# ════════════════════════════════════════════════════════════════════════
 
 @router.post("/squad/inject")
 async def inject_squad(
     nation: str = Query(..., description="Nom du pays"),
     coach_name: Optional[str] = Query(None),
+    players_data: List[Dict] = Body(..., description="Liste des joueurs à injecter"), # Ajout de players_data
     admin: dict = Depends(verify_admin),
 ):
     db = SessionLocal()
     try:
-        team = db.query(TeamNation).filter(TeamNation.name == nation).first()
-        if not team:
-            team = TeamNation(
-                name=nation, squad_status="brouillon", is_locked=False,
-                last_updated=datetime.utcnow().isoformat(),
-            )
-            db.add(team)
-            db.flush()
-        if coach_name:
-            existing_coach = db.query(Coach).filter(Coach.name == coach_name, Coach.nationality == nation).first()
-            if not existing_coach:
-                coach = Coach(
-                    name=coach_name, nationality=nation, team_name=nation,
-                    is_confirmed=True, price=6.0, wins=0, losses=0, points_total=0,
-                )
-                db.add(coach)
-                db.flush()
-        msg = f"✅ Squad {nation} injectée avec entraîneur {coach_name or 'N/A'}"
+        # Appelle la fonction d'injection centralisée
+        inject_team_nation(db, nation, coach_name, players_data)
+
+        msg = f"✅ Squad {nation} injectée avec {len(players_data)} joueurs et l'entraîneur {coach_name or 'N/A'}."
         _log_action("squad_injected", "team", target_id=nation, details=msg)
-        db.commit()
         return {"status": "success", "message": msg, "nation": nation}
     except Exception as e:
         db.rollback()
+        logger.error(f"inject_squad error: {e}")
         raise HTTPException(500, str(e))
     finally:
         db.close()
+
+
+@router.post("/squad/estimate-prices")
+async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admin)):
+    pricing_result, msg = await ai_service.estimate_player_prices(req.squad_data)
+    if not pricing_result:
+        _log_action("pricing_failed", "player", details=msg)
+        return {"status": "error", "message": msg}
+    _log_action("pricing_success", "player", details=msg)
+    return {"status": "success", "message": msg, "pricing": pricing_result.get("pricing", [])}
 
 
 @router.get("/squad/filled-nations")
@@ -478,12 +511,12 @@ async def update_player(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  INJECTION TOURNOI
+#  INJECTION TOURNOI (MàJ pour utiliser ai_service)
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/tournament/parse")
 async def parse_tournament(req: TournamentInjectionRequest, admin: dict = Depends(verify_admin)):
-    parsed, msg = await parse_tournament_data(req.raw_tournament_text)
+    parsed, msg = await ai_service.parse_tournament_data(req.raw_tournament_text)
     if not parsed:
         return {"status": "error", "message": msg}
     return {"status": "success", "message": msg, "parsed_data": parsed}
@@ -518,12 +551,12 @@ async def add_match(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  ENTRAÎNEUR
+#  ENTRAÎNEUR (MàJ pour utiliser ai_service)
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/coach/parse")
 async def parse_coach(req: CoachInjectionRequest, admin: dict = Depends(verify_admin)):
-    parsed, msg = await parse_coach_data(req.raw_coach_text)
+    parsed, msg = await ai_service.parse_coach_data(req.raw_coach_text)
     if not parsed:
         return {"status": "error", "message": msg}
     return {"status": "success", "message": msg, "parsed_data": parsed}
@@ -556,12 +589,12 @@ async def add_coach(
 
 
 # ════════════════════════════════════════════════════════════════════════
-#  RÈGLES
+#  RÈGLES (MàJ pour utiliser ai_service)
 # ════════════════════════════════════════════════════════════════════════
 
 @router.post("/rules/parse")
 async def parse_rules_endpoint(req: RulesParseRequest, admin: dict = Depends(verify_admin)):
-    parsed, msg = await parse_rules(req.raw_rules_text)
+    parsed, msg = await ai_service.parse_rules(req.raw_rules_text)
     if not parsed:
         return {"status": "error", "message": msg}
     return {"status": "success", "message": msg, "rules": parsed.get("rules", [])}
