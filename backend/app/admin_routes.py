@@ -1,17 +1,19 @@
 """
 admin_routes.py — Routes d'administration
 ===========================================
-v3.0 — Corrections :
-  ✅ Imports complets (UploadFile, File, Body, Union, Optional)
-  ✅ Instance ai_service centralisée
-  ✅ inject_team_nation importé depuis admin_services
-  ✅ Endpoint /ai/effectif fonctionnel (texte + image)
-  ✅ Endpoint /squad/inject corrigé
+v4.0 — Corrections critiques :
+  ✅ /ai/effectif accepte JSON body (texte) ET FormData (image)
+     sans conflit de Content-Type
+  ✅ /squad/inject reçoit les joueurs en body JSON (liste)
+  ✅ Tous les imports présents (Optional, List, Union, etc.)
 """
 
 import logging
 import secrets
-from fastapi import APIRouter, HTTPException, Header, Depends, Query, UploadFile, File, Body
+from fastapi import (
+    APIRouter, HTTPException, Header, Depends,
+    Query, UploadFile, File, Body, Request,
+)
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
@@ -36,9 +38,10 @@ except ImportError as _e:
     ai_service = None
     logger.warning("ai_service non disponible : %s", _e)
 
-# ════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════
 #  MODÈLES PYDANTIC
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 class AdminLoginRequest(BaseModel):
     username: str
@@ -77,9 +80,10 @@ class RuleUpdateRequest(BaseModel):
 class RulesParseRequest(BaseModel):
     raw_rules_text: str
 
-# ════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════
 #  DÉPENDANCES
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 async def verify_admin(authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
@@ -105,9 +109,9 @@ def _log_action(action: str, target_type: str, target_id: str = None, details: s
         logger.error(f"Logging erreur : {e}")
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  AUTH
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/login", response_model=AdminLoginResponse)
 async def admin_login(req: AdminLoginRequest):
@@ -124,9 +128,9 @@ async def admin_status(admin: dict = Depends(verify_admin)):
     return {"status": "authenticated", "user": admin.get("sub"), "type": admin.get("type")}
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  GESTION UTILISATEURS
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.get("/users")
 async def list_users(admin: dict = Depends(verify_admin)):
@@ -169,13 +173,16 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
         username = user.username or user.email
         _log_action("user_deleted", "user", target_id=str(user_id), details=username)
         from sqlalchemy import text as sql_text
-        db.execute(sql_text("DELETE FROM prediction_scores WHERE user_id = :uid"),    {"uid": user_id})
-        db.execute(sql_text("DELETE FROM prediction_tableaux WHERE user_id = :uid"),  {"uid": user_id})
-        db.execute(sql_text("DELETE FROM prediction_annexes WHERE user_id = :uid"),   {"uid": user_id})
-        db.execute(sql_text("DELETE FROM complaints WHERE user_id = :uid"),           {"uid": user_id})
-        db.execute(sql_text("DELETE FROM roster_player WHERE roster_id IN (SELECT id FROM fantasy_rosters WHERE user_id = :uid)"), {"uid": user_id})
-        db.execute(sql_text("DELETE FROM fantasy_rosters WHERE user_id = :uid"),      {"uid": user_id})
-        db.execute(sql_text("DELETE FROM user_league WHERE user_id = :uid"),          {"uid": user_id})
+        for stmt, params in [
+            ("DELETE FROM prediction_scores WHERE user_id = :uid",    {"uid": user_id}),
+            ("DELETE FROM prediction_tableaux WHERE user_id = :uid",  {"uid": user_id}),
+            ("DELETE FROM prediction_annexes WHERE user_id = :uid",   {"uid": user_id}),
+            ("DELETE FROM complaints WHERE user_id = :uid",           {"uid": user_id}),
+            ("DELETE FROM roster_player WHERE roster_id IN (SELECT id FROM fantasy_rosters WHERE user_id = :uid)", {"uid": user_id}),
+            ("DELETE FROM fantasy_rosters WHERE user_id = :uid",      {"uid": user_id}),
+            ("DELETE FROM user_league WHERE user_id = :uid",          {"uid": user_id}),
+        ]:
+            db.execute(sql_text(stmt), params)
         db.delete(user)
         db.commit()
         return {"status": "success", "message": f"✅ Compte {username} supprimé définitivement."}
@@ -189,9 +196,9 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  LIGUE GÉNÉRALE
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/leagues/general")
 async def create_general_league(admin: dict = Depends(verify_admin)):
@@ -252,7 +259,8 @@ async def get_general_league_ranking(admin: dict = Depends(verify_admin)):
             total    = fantasy + scores + bracket + annexes
             members_data.append({
                 "id": u.id, "username": u.username or u.email, "email": u.email,
-                "fantasy": fantasy, "scores": scores, "bracket": bracket, "annexes": annexes, "total": total,
+                "fantasy": fantasy, "scores": scores, "bracket": bracket,
+                "annexes": annexes, "total": total,
             })
 
         def ranked(entries, key):
@@ -304,48 +312,98 @@ async def sync_general_league(admin: dict = Depends(verify_admin)):
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  ENDPOINT IA UNIVERSEL — POST /ai/effectif
-# ════════════════════════════════════════════════════════════════════════
+#  ✅ CORRIGÉ : accepte JSON body (texte) ET multipart/form-data (image)
+#               sans forcer Content-Type côté client
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/ai/effectif", response_model=AIParseResponse)
 async def ai_effectif(
-    nation: Optional[str] = Query(None, description="Nation suggérée"),
-    raw_text: Optional[str] = Query(None, description="Texte brut"),
-    file: Optional[UploadFile] = File(None),
+    request: Request,
     admin: dict = Depends(verify_admin),
 ):
     """
-    Endpoint universel IA pour le parsing d'effectif.
-    Accepte :
-      - Un fichier image (multipart/form-data, champ 'file')
-      - Du texte via query param 'raw_text'
-    
-    L'IA détecte automatiquement le pays si non fourni via 'nation'.
+    Endpoint universel IA — parsing d'effectif.
+
+    Deux modes détectés automatiquement selon Content-Type :
+
+    MODE TEXTE (application/json) :
+        Body JSON : {"nation": "France", "raw_text": "Gardien: Mike Maignan..."}
+
+    MODE IMAGE (multipart/form-data) :
+        Champs : file=<image>, nation=<string optionnel>
+
+    Pas besoin de spécifier le mode côté client — le backend le détecte seul.
     """
     if not AI_ROUTES_AVAILABLE or ai_service is None:
-        raise HTTPException(503, "Moteur IA non disponible (vérifiez l'import de ai_service).")
-
+        raise HTTPException(503, "Moteur IA non disponible.")
     if not (ai_service.groq_configured or ai_service.gemini_configured):
         raise HTTPException(503, "Aucune clé IA configurée (GROQ_API_KEY ou GEMINI_API_KEY dans .env).")
 
-    # ── Lire l'input ────────────────────────────────────────────────────
+    content_type = request.headers.get("content-type", "")
     raw_input: Optional[Union[str, bytes]] = None
+    nation: Optional[str] = None
 
-    if file and file.filename:
-        # Image uploadée
-        content_type = file.content_type or ""
-        if not content_type.startswith("image/"):
-            raise HTTPException(400, f"Type de fichier non supporté : {content_type}. Envoyez une image.")
-        raw_input = await file.read()
-        logger.info("ai_effectif: image reçue (%s, %d octets)", file.filename, len(raw_input))
-    elif raw_text and raw_text.strip():
-        raw_input = raw_text.strip()
-        logger.info("ai_effectif: texte reçu (%d caractères)", len(raw_input))
+    # ── Détection automatique du mode ────────────────────────────────────────
+    if "multipart/form-data" in content_type:
+        # Mode image
+        try:
+            form = await request.form()
+            nation = form.get("nation") or None
+            file_obj = form.get("file")
+            if file_obj is None:
+                raise HTTPException(400, "Champ 'file' manquant dans le FormData.")
+            if not hasattr(file_obj, "read"):
+                raise HTTPException(400, "Le champ 'file' n'est pas un fichier.")
+            ct = getattr(file_obj, "content_type", "") or ""
+            if not ct.startswith("image/"):
+                raise HTTPException(400, f"Type de fichier non supporté : {ct}. Envoyez une image.")
+            raw_input = await file_obj.read()
+            logger.info("ai_effectif: mode IMAGE (%d octets, nation=%s)", len(raw_input), nation)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Erreur lecture FormData : {e}")
+
+    elif "application/json" in content_type:
+        # Mode texte — body JSON
+        try:
+            body = await request.json()
+            nation    = body.get("nation") or None
+            raw_input = (body.get("raw_text") or "").strip()
+            if not raw_input:
+                raise HTTPException(400, "Champ 'raw_text' manquant ou vide dans le JSON body.")
+            logger.info("ai_effectif: mode TEXTE JSON (%d chars, nation=%s)", len(raw_input), nation)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Erreur lecture JSON body : {e}")
+
     else:
-        raise HTTPException(400, "Fournissez soit 'file' (image) soit 'raw_text' (texte).")
+        # Fallback — essayer de lire comme JSON quand même
+        try:
+            body = await request.json()
+            nation    = body.get("nation") or None
+            raw_input = (body.get("raw_text") or "").strip()
+            if raw_input:
+                logger.info("ai_effectif: mode TEXTE fallback (%d chars)", len(raw_input))
+            else:
+                raise HTTPException(
+                    400,
+                    "Content-Type non reconnu. Envoyez application/json avec {raw_text} "
+                    "ou multipart/form-data avec un champ file."
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                415,
+                "Content-Type non supporté. Utilisez application/json (texte) "
+                "ou multipart/form-data (image)."
+            )
 
-    # ── Appel IA ─────────────────────────────────────────────────────────
+    # ── Appel IA ──────────────────────────────────────────────────────────────
     try:
         parsed_data, msg = await ai_service.parse_squad_list(raw_input)
     except Exception as exc:
@@ -356,7 +414,7 @@ async def ai_effectif(
         _log_action("ai_effectif_parse_failed", "ai_squad", target_id=nation or "N/A", details=msg)
         return AIParseResponse(status="error", message=msg)
 
-    # Forcer la nation si fournie et non détectée
+    # Forcer la nation si fournie et non détectée par l'IA
     if nation and not parsed_data.get("nation"):
         parsed_data["nation"] = nation
 
@@ -365,9 +423,10 @@ async def ai_effectif(
     return AIParseResponse(status="success", message=msg, parsed_data=parsed_data)
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  INJECTION EFFECTIFS — POST /squad/inject
-# ════════════════════════════════════════════════════════════════════════
+#  ✅ CORRIGÉ : reçoit les joueurs en body JSON (List[Dict])
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/squad/inject")
 async def inject_squad(
@@ -378,9 +437,9 @@ async def inject_squad(
 ):
     """
     Injecte l'effectif d'une nation en base.
-    - Supprime les anciens joueurs de l'équipe
-    - Insère les nouveaux joueurs (avec normalisation des positions)
-    - Crée/met à jour l'entraîneur si fourni
+
+    Query params : nation=France&coach_name=Deschamps
+    Body JSON    : [{"name": "Mbappé", "position": "A", "price": 14.0}, ...]
     """
     if not nation.strip():
         raise HTTPException(400, "Le nom de la nation est obligatoire.")
@@ -408,7 +467,6 @@ async def inject_squad(
 
 @router.get("/squad/filled-nations")
 async def get_filled_nations(admin: dict = Depends(verify_admin)):
-    """Retourne les nations dont l'effectif est complet (joueurs + entraîneur)."""
     db = SessionLocal()
     try:
         filled = []
@@ -442,9 +500,9 @@ async def estimate_prices(req: PricingRequest, admin: dict = Depends(verify_admi
     return {"status": "success", "message": msg, "pricing": pricing_result.get("pricing", [])}
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  JOUEURS
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/player/add")
 async def add_player(
@@ -466,8 +524,9 @@ async def add_player(
         db.commit()
         _log_action("player_added", "player", target_id=name, details=f"{position} | {nationality}")
         return {"status": "success", "message": f"✅ Joueur {name} ajouté",
-                "player": {"id": player.id, "name": player.name, "position": player.position,
-                           "nationality": player.nationality, "price": player.price}}
+                "player": {"id": player.id, "name": player.name,
+                           "position": player.position, "nationality": player.nationality,
+                           "price": player.price}}
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
@@ -501,9 +560,9 @@ async def update_player(
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  TOURNOI
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/tournament/parse")
 async def parse_tournament(req: TournamentInjectionRequest, admin: dict = Depends(verify_admin)):
@@ -543,9 +602,9 @@ async def add_match(
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  ENTRAÎNEURS
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/coach/parse")
 async def parse_coach(req: CoachInjectionRequest, admin: dict = Depends(verify_admin)):
@@ -575,7 +634,8 @@ async def add_coach(
         db.commit()
         _log_action("coach_added", "coach", target_id=name, details=nationality)
         return {"status": "success", "message": f"✅ Entraîneur {name} ajouté",
-                "coach": {"id": coach.id, "name": coach.name, "nationality": coach.nationality, "price": coach.price}}
+                "coach": {"id": coach.id, "name": coach.name,
+                          "nationality": coach.nationality, "price": coach.price}}
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
@@ -583,9 +643,9 @@ async def add_coach(
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  RÈGLES
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.post("/rules/parse")
 async def parse_rules_endpoint(req: RulesParseRequest, admin: dict = Depends(verify_admin)):
@@ -619,10 +679,10 @@ async def update_rule(req: RuleUpdateRequest, admin: dict = Depends(verify_admin
     try:
         rule = db.query(AdminGameRule).filter(AdminGameRule.rule_name == req.rule_name).first()
         if rule:
-            rule.description = req.description
+            rule.description       = req.description
             rule.position_affected = req.position_affected
-            rule.points_value = req.points_value
-            rule.is_active = req.is_active
+            rule.points_value      = req.points_value
+            rule.is_active         = req.is_active
             action = "rule_updated"
         else:
             rule = AdminGameRule(
@@ -643,9 +703,9 @@ async def update_rule(req: RuleUpdateRequest, admin: dict = Depends(verify_admin
         db.close()
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 #  LOGS
-# ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
 
 @router.get("/logs")
 async def get_logs(limit: int = Query(50), admin: dict = Depends(verify_admin)):
@@ -653,7 +713,8 @@ async def get_logs(limit: int = Query(50), admin: dict = Depends(verify_admin)):
     try:
         logs = db.query(AdminLog).order_by(AdminLog.created_at.desc()).limit(limit).all()
         return {"status": "success", "logs": [
-            {"id": log.id, "action": log.action, "target": f"{log.target_type}:{log.target_id}",
+            {"id": log.id, "action": log.action,
+             "target": f"{log.target_type}:{log.target_id}",
              "details": log.details, "timestamp": log.created_at.isoformat()}
             for log in logs
         ]}
