@@ -428,6 +428,33 @@ async def ai_effectif(
 #  ✅ CORRIGÉ : reçoit les joueurs en body JSON (List[Dict])
 # ════════════════════════════════════════════════════════════════════
 
+class SquadParseRequest(BaseModel):
+    nation: Optional[str] = None
+    raw_squad_text: str
+
+@router.post("/squad/parse")
+async def parse_squad(req: SquadParseRequest, admin: dict = Depends(verify_admin)):
+    """Parse un effectif via IA et retourne les données structurées."""
+    if not ai_service:
+        raise HTTPException(503, "Moteur IA non disponible.")
+    if not (ai_service.groq_configured or ai_service.gemini_configured):
+        raise HTTPException(503, "Aucune clé IA configurée (GROQ_API_KEY dans backend/.env).")
+
+    raw = req.raw_squad_text.strip()
+    if len(raw) < 10:
+        raise HTTPException(400, "Texte trop court.")
+
+    parsed_data, msg = await ai_service.parse_squad_list(raw)
+    if not parsed_data:
+        return {"status": "error", "message": msg, "parsed_data": None}
+
+    if req.nation and not parsed_data.get("nation"):
+        parsed_data["nation"] = req.nation
+
+    _log_action("squad_parse_success", "ai_squad",
+                target_id=parsed_data.get("nation", "N/A"), details=msg)
+    return {"status": "success", "message": msg, "parsed_data": parsed_data}
+
 @router.post("/squad/inject")
 async def inject_squad(
     nation: str = Query(..., description="Nom du pays"),
