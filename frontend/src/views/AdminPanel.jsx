@@ -678,7 +678,7 @@ function GeneralLeagueSection() {
 //  SECTION : Effectifs
 // ════════════════════════════════════════════════════════════════════════════
 
-function SquadsSection() { // groqKey n'est plus nécessaire ici
+function SquadsSection({ groqKey }) {
   const [selectedNation, setSelectedNation] = useState(null);
   const [inputMode,   setInputMode]   = useState("text");
   const [promptText,  setPromptText]  = useState("");
@@ -723,58 +723,30 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
   const updatePlayer = (id,field,val) => setPlayers(prev=>prev.map(p=>p.id===id?{...p,[field]:val}:p));
   const removePlayer = (id) => setPlayers(prev=>prev.filter(p=>p.id!==id));
 
-  const parseWithAI = async () => { // Renommé de parseWithGroq à parseWithAI
+  const parseWithGroq = async () => {
     if(!selectedNation){ showFb("err","❌ Sélectionnez une nation."); return; }
     const hasContent = inputMode==="text" ? promptText.trim().length>5 : !!imageData;
     if(!hasContent){ showFb("err","❌ Fournissez du texte ou une capture d'écran."); return; }
 
-    setBusy(true); showFb("info","🧠 AI analyse les données via le backend...",0);
+    setBusy(true); showFb("info","🤖 Groq analyse les données via le backend...",0);
     try {
-      let res;
+      let rawText = "";
       if(inputMode === "text") {
-        // Envoi du prompt en JSON body
-        res  = await adminFetch("/ai/effectif", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ nation: selectedNation, raw_text: promptText }),
-        });
+        rawText = `Nation: ${selectedNation}\n\n${promptText}`;
       } else {
-        // Envoi de l'image via FormData
-        const formData = new FormData();
-        // Convertir imageData (base64) en Blob pour l'upload
-        const byteString = atob(imageData.split(',')[1]);
-        const mimeString = imageData.split(',')[0].split(':')[1].split(';')[0];
-        const ab = new ArrayBuffer(byteString.length);
-        const ia = new Uint8Array(ab);
-        for (let i = 0; i < byteString.length; i++) {
-            ia[i] = byteString.charCodeAt(i);
-        }
-        const blob = new Blob([ab], {type: mimeString});
-
-        formData.append("file", blob, imageName || "image.png");
-        formData.append("nation", selectedNation); // Passer la nation comme champ FormData
-
-        res  = await adminFetch("/ai/effectif", {
-          method: "POST",
-          // Content-Type sera automatiquement défini par le navigateur pour FormData
-          body: formData,
-        });
+        rawText = `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;
       }
-
+      const res  = await adminFetch("/squad/parse", {
+        method: "POST",
+        body: JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),
+      });
       const data = await res.json();
       if(!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");
       const parsed = data.parsed_data;
       if(!parsed) throw new Error("Données parsées vides");
-
-      // Ici, on attend du backend que 'nation' soit présent dans parsed.
-      // Si une nation est fournie par l'IA ou par la requête originale, elle sera là.
-      // S'assurer que le backend renvoie la nation parsée ou la nation fournie.
-      setSelectedNation(parsed.nation || selectedNation);
-
       if(parsed.coach_name) setCoachName(parsed.coach_name);
       if(parsed.players && parsed.players.length > 0) {
-        // Le backend peut déjà estimer les prix, mais si non, on garde le 6.5 par défaut
-        setPlayers(parsed.players.map(p => ({ id:uid(), name:p.name||"", position:p.position||"M", price:p.suggested_price||6.5 })));
+        setPlayers(parsed.players.map(p => ({ id:uid(), name:p.name||"", position:p.position||"M", price:p.price||6.5 })));
         showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);
       } else {
         showFb("err","⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");
@@ -790,17 +762,11 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
     try {
       const params = new URLSearchParams({nation:selectedNation});
       if(coachName) params.append("coach_name",coachName);
-
-      // Envoyez les joueurs dans le corps de la requête POST
-      const res  = await adminFetch(`/squad/inject?${params}`,{
-        method:"POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(players), // Envoie la liste des joueurs
-      });
+      const res  = await adminFetch(`/squad/inject?${params}`,{method:"POST"});
       const data = await res.json();
       if(data.status==="success") {
         showFb("ok", data.message||"Effectif enregistré !");
-        await loadFilledNations(); // Recharger les nations complètes
+        await loadFilledNations();
       } else {
         showFb("err", data.message||"Erreur serveur");
       }
@@ -876,8 +842,8 @@ function SquadsSection() { // groqKey n'est plus nécessaire ici
                 <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e=>setCoachName(e.target.value)}/>
               </div>
               <div style={{display:"flex",alignItems:"flex-end"}}>
-                <button className="btn-action btn-blue" style={{width:"100%"}} onClick={parseWithAI} disabled={busy}>
-                  {busy?<><span className="spinner"/> Analyse...</>:"🤖 Parser avec AI (backend)"}
+                <button className="btn-action btn-blue" style={{width:"100%"}} onClick={parseWithGroq} disabled={busy}>
+                  {busy?<><span className="spinner"/> Analyse...</>:"🤖 Parser avec Groq (backend)"}
                 </button>
               </div>
             </div>
@@ -1318,7 +1284,7 @@ function AdminDashboard({ onLogout }) {
         {activeTab==="settings"       && <SettingsSection groqKey={groqKey} onGroqKeyChange={setGroqKey}/>}
         {activeTab==="users"          && <UsersSection/>}
         {activeTab==="general_league" && <GeneralLeagueSection/>}
-        {activeTab==="squads"         && <SquadsSection/>}
+        {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
         {activeTab==="tournament"     && <TournamentSection/>}
         {activeTab==="rules"          && <RulesSection/>}
         {activeTab==="tools"          && <ToolsSection/>}
