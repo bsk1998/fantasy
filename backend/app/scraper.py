@@ -90,8 +90,11 @@ class TeamSquad:
 # STRATÉGIE 1 : Scraping HTTP direct
 # ─────────────────────────────────────────────
 
-async def fetch_page_html(url: str = OLYMPICS_URL) -> Optional[str]:
-    """Télécharge le HTML de la page olympics.com."""
+async def fetch_page_html(url: str = OLYMPICS_URL) -> tuple[Optional[str], str]:
+    """
+    Télécharge le HTML. Retourne (html, message).
+    Détecte si la page nécessite JavaScript et avertit l'utilisateur.
+    """
     try:
         async with httpx.AsyncClient(
             headers=SCRAPER_HEADERS,
@@ -100,14 +103,45 @@ async def fetch_page_html(url: str = OLYMPICS_URL) -> Optional[str]:
         ) as client:
             resp = await client.get(url)
             resp.raise_for_status()
-            logger.info(f"[olympics] Page récupérée : {resp.status_code} ({len(resp.text)} chars)")
-            return resp.text
+            html = resp.text
+            logger.info(f"[olympics] Page récupérée : {resp.status_code} ({len(html)} chars)")
+
+            # Détecter si c'est une SPA (Single Page App) qui requiert JS
+            soup = BeautifulSoup(html, "html.parser")
+            text_content = soup.get_text(strip=True)
+            
+            has_spa_root = bool(
+                soup.find("div", id="root") or
+                soup.find("div", id="__next") or
+                soup.find("div", id="app")
+            )
+            has_many_scripts = len(soup.find_all("script")) > 3
+            is_js_rendered = (has_spa_root or has_many_scripts) and len(text_content) < 500
+            
+            if is_js_rendered:
+                logger.warning("[olympics] Page détectée comme JS-rendered (SPA). Contenu réel non accessible via HTTP simple.")
+                return None, (
+                    "olympics.com utilise du rendu JavaScript (React SPA). "
+                    "Le contenu des effectifs n'est pas accessible via une requête HTTP simple. "
+                    "Solution : ouvrez la page dans votre navigateur, sélectionnez tout le texte "
+                    "(Ctrl+A puis Ctrl+C), collez-le dans le champ 'Texte brut' ci-dessous et "
+                    "cliquez sur 'Parser avec Groq IA'."
+                )
+            return html, f"Page récupérée ({len(html)} chars)"
+
     except httpx.HTTPStatusError as e:
-        logger.warning(f"[olympics] HTTP {e.response.status_code} — site bloqué ou URL incorrecte")
-        return None
+        msg = f"HTTP {e.response.status_code} — "
+        if e.response.status_code == 403:
+            msg += "Accès refusé (bot détecté). Utilisez l'import manuel via copier-coller."
+        elif e.response.status_code == 404:
+            msg += "URL introuvable. La page a peut-être changé d'adresse."
+        else:
+            msg += "Erreur serveur."
+        logger.warning(f"[olympics] {msg}")
+        return None, msg
     except Exception as e:
         logger.error(f"[olympics] Erreur réseau : {e}")
-        return None
+        return None, f"Erreur réseau : {e}. Vérifiez votre connexion."
 
 
 def parse_html_to_squads(html: str) -> list[TeamSquad]:

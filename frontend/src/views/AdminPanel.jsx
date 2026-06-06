@@ -9,6 +9,7 @@
  * ✅ Fix 6 : AdminLogin — guillemets JSX corrigés (plus de backslash-escape)
  * ✅ Étape 1.2 : POST /squads/import-from-olympics (bouton + spinner + rapport)
  * ✅ Étape 2.2 : Table effectifs éditable inline (double-clic = input, Entrée = save)
+ * ✅ Ajustement : Logique de guidage et bandeau d'aide en cas d'échec d'import automatique
  */
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
@@ -247,7 +248,7 @@ function SquadsSection() {
 
   useEffect(() => { loadFilledNations(); }, [loadFilledNations]);
 
-  // ── Import Olympics (Étape 1.3) ──────────────────────────────────────────
+  // ── Import Olympics Modifié ──────────────────────────────────────────────
   const importFromOlympics = async () => {
     setImportBusy(true);
     setImportReport(null);
@@ -260,7 +261,14 @@ function SquadsSection() {
         showFb("ok", `✅ ${data.imported} nations importées (stratégie : ${data.strategy})`);
         await loadFilledNations();
       } else {
-        showFb("err", `❌ Import échoué : ${data.message}`);
+        // Import échoué → on suggère le fallback
+        showFb("err", `❌ Import automatique impossible. Utilisez l'option "Coller texte" ci-dessous.`);
+        // Sélectionner automatiquement le mode texte pour guider l'utilisateur
+        setInputMode("text");
+        if (!selectedNation) {
+          // Afficher un prompt pour choisir une nation
+          setPromptText(""); // vider pour inciter à coller
+        }
       }
     } catch (e) {
       showFb("err", "Erreur réseau : " + e.message);
@@ -421,7 +429,7 @@ function SquadsSection() {
       </p>
       <Feedback msg={fb} />
 
-      {/* ── BOUTON IMPORT OLYMPICS (Étape 1.3) ── */}
+      {/* ── BOUTON IMPORT OLYMPICS ── */}
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">🌐 Import depuis olympics.com</div>
         <p style={{ fontSize: ".8rem", color: "var(--text2)", marginBottom: 12, lineHeight: 1.6 }}>
@@ -467,6 +475,28 @@ function SquadsSection() {
                 ℹ️ {importReport.message}
               </div>
             )}
+          </div>
+        )}
+
+        {/* BANDEAU D'AIDE EN CAS D'ÉCHEC */}
+        {importReport && importReport.status === "error" && (
+          <div style={{
+            marginTop: 12,
+            background: "rgba(255,200,50,.07)",
+            border: "1px solid rgba(255,200,50,.3)",
+            borderRadius: 8, padding: "12px 14px",
+            fontSize: ".78rem", lineHeight: 1.7,
+          }}>
+            <div style={{ fontWeight: 700, color: "var(--gold)", marginBottom: 6 }}>
+              💡 Comment importer manuellement ?
+            </div>
+            <ol style={{ margin: 0, paddingLeft: 18, color: "var(--text2)" }}>
+              <li>Ouvrez <a href="https://www.olympics.com/fr/infos/coupe-du-monde-2026-composition-equipes-selections-liste-joueurs" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>cette page olympics.com</a> dans votre navigateur</li>
+              <li>Attendez que la page soit complètement chargée</li>
+              <li>Sélectionnez tout le texte (<strong>Ctrl+A</strong>)</li>
+              <li>Copiez (<strong>Ctrl+C</strong>)</li>
+              <li>Choisissez une nation ci-dessous, collez dans le champ texte et cliquez <strong>Parser avec Groq</strong></li>
+            </ol>
           </div>
         )}
       </div>
@@ -535,7 +565,7 @@ function SquadsSection() {
             </div>
           </div>
 
-          {/* ── TABLE ÉDITABLE INLINE (Étape 2.2) ── */}
+          {/* ── TABLE ÉDITABLE INLINE ── */}
           <div className="card">
             <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>
@@ -849,7 +879,7 @@ function ToolsSection() {
   );
 }
 
-// --- LOGIN FORM (bug corrigé : plus de guillemets échappés) ---
+// --- LOGIN FORM ---
 function AdminLogin({ onLoginSuccess }) {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
@@ -893,7 +923,6 @@ function AdminLogin({ onLoginSuccess }) {
           <input className="inp" type="password" placeholder="••••••" value={pass} onChange={e => setPass(e.target.value)} required />
         </div>
         {err && <p className="err-msg">⚠ {err}</p>}
-        {/* ✅ FIX : guillemets JSX normaux, pas de backslash-escape */}
         <button className="btn-primary" type="submit" disabled={busy}>
           {busy
             ? <><span className="spinner" style={{ borderTopColor: "#fff" }} /> Connexion...</>

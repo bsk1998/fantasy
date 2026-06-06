@@ -304,8 +304,6 @@ async def sync_general_league(admin: dict = Depends(verify_admin)):
 
 # ════════════════════════════════════════════════════════════════════
 #  ENDPOINT IA UNIVERSEL — POST /ai/effectif
-#  ✅ CORRIGÉ : accepte JSON body (texte) ET multipart/form-data (image)
-#               sans forcer Content-Type côté client
 # ════════════════════════════════════════════════════════════════════
 
 @router.post("/ai/effectif", response_model=AIParseResponse)
@@ -313,19 +311,6 @@ async def ai_effectif(
     request: Request,
     admin: dict = Depends(verify_admin),
 ):
-    """
-    Endpoint universel IA — parsing d'effectif.
-
-    Deux modes détectés automatiquement selon Content-Type :
-
-    MODE TEXTE (application/json) :
-        Body JSON : {"nation": "France", "raw_text": "Gardien: Mike Maignan..."}
-
-    MODE IMAGE (multipart/form-data) :
-        Champs : file=<image>, nation=<string optionnel>
-
-    Pas besoin de spécifier le mode côté client — le backend le détecte seul.
-    """
     if not AI_ROUTES_AVAILABLE or ai_service is None:
         raise HTTPException(503, "Moteur IA non disponible.")
     if not (ai_service.groq_configured or ai_service.gemini_configured):
@@ -335,9 +320,7 @@ async def ai_effectif(
     raw_input: Optional[Union[str, bytes]] = None
     nation: Optional[str] = None
 
-    # ── Détection automatique du mode ────────────────────────────────────────
     if "multipart/form-data" in content_type:
-        # Mode image
         try:
             form = await request.form()
             nation = form.get("nation") or None
@@ -357,7 +340,6 @@ async def ai_effectif(
             raise HTTPException(400, f"Erreur lecture FormData : {e}")
 
     elif "application/json" in content_type:
-        # Mode texte — body JSON
         try:
             body = await request.json()
             nation    = body.get("nation") or None
@@ -371,7 +353,6 @@ async def ai_effectif(
             raise HTTPException(400, f"Erreur lecture JSON body : {e}")
 
     else:
-        # Fallback — essayer de lire comme JSON quand même
         try:
             body = await request.json()
             nation    = body.get("nation") or None
@@ -393,7 +374,6 @@ async def ai_effectif(
                 "ou multipart/form-data (image)."
             )
 
-    # ── Appel IA ──────────────────────────────────────────────────────────────
     try:
         parsed_data, msg = await ai_service.parse_squad_list(raw_input)
     except Exception as exc:
@@ -404,7 +384,6 @@ async def ai_effectif(
         _log_action("ai_effectif_parse_failed", "ai_squad", target_id=nation or "N/A", details=msg)
         return AIParseResponse(status="error", message=msg)
 
-    # Forcer la nation si fournie et non détectée par l'IA
     if nation and not parsed_data.get("nation"):
         parsed_data["nation"] = nation
 
@@ -415,7 +394,6 @@ async def ai_effectif(
 
 # ════════════════════════════════════════════════════════════════════
 #  INJECTION EFFECTIFS — POST /squad/inject
-#  ✅ CORRIGÉ : reçoit les joueurs en body JSON (List[Dict])
 # ════════════════════════════════════════════════════════════════════
 
 class SquadParseRequest(BaseModel):
@@ -424,7 +402,6 @@ class SquadParseRequest(BaseModel):
 
 @router.post("/squad/parse")
 async def parse_squad(req: SquadParseRequest, admin: dict = Depends(verify_admin)):
-    """Parse un effectif via IA et retourne les données structurées."""
     if not ai_service:
         raise HTTPException(503, "Moteur IA non disponible.")
     if not (ai_service.groq_configured or ai_service.gemini_configured):
@@ -452,12 +429,6 @@ async def inject_squad(
     players_data: List[Dict] = Body(..., description="Liste des joueurs"),
     admin: dict = Depends(verify_admin),
 ):
-    """
-    Injecte l'effectif d'une nation en base.
-
-    Query params : nation=France&coach_name=Deschamps
-    Body JSON    : [{"name": "Mbappé", "position": "A", "price": 14.0}, ...]
-    """
     if not nation.strip():
         raise HTTPException(400, "Le nom de la nation est obligatoire.")
     if not players_data or len(players_data) < 3:
@@ -731,18 +702,9 @@ async def import_from_olympics(admin: dict = Depends(verify_admin)):
     avec flag source = "olympics".
     """
     from app.scraper import import_squads_from_olympics
-    from app.admin_services import inject_team_nation
     db = SessionLocal()
     try:
-        # Tentative de scraping HTTP + fallback IA
         squads, message, strategy = await import_squads_from_olympics(ai_service=ai_service)
-        if not squads:
-            return {
-                "status": "error",
-                "message": message,
-                "strategy": strategy,
-                "imported": 0,
-            }
 
         imported_nations = []
         errors = []
@@ -756,7 +718,7 @@ async def import_from_olympics(admin: dict = Depends(verify_admin)):
                         "price":    p.price,
                         "club":     p.club,
                         "number":   p.number,
-                        "source":   "olympics",   # flag source
+                        "source":   "olympics",
                     }
                     for p in squad.players
                 ]
@@ -813,7 +775,6 @@ async def patch_player(
     req: PlayerPatchRequest,
     admin: dict = Depends(verify_admin),
 ):
-    """Édition inline d'un joueur (nom, poste, prix, nation)."""
     db = SessionLocal()
     try:
         player = db.query(Player).filter(Player.id == player_id).first()
@@ -850,7 +811,6 @@ async def patch_coach(
     req: CoachPatchRequest,
     admin: dict = Depends(verify_admin),
 ):
-    """Édition inline d'un entraîneur (nom, prix, nation)."""
     db = SessionLocal()
     try:
         coach = db.query(Coach).filter(Coach.id == coach_id).first()
