@@ -2,11 +2,13 @@
  * AdminPanel.jsx — Panneau d'administration Fantasy Boulzazen WC 2026
  * ====================================================================
  * ✅ Fix 1 : ToolsSection vérifie groq_configure depuis /api/scraping/status
- * au lieu de vérifier la clé localStorage
  * ✅ Fix 2 : UsersSection — token Bearer transmis correctement via adminFetch
- * ✅ Fix 3 : RulesSection — saveRules envoie TOUTES les règles en BDD, pas une seule
+ * ✅ Fix 3 : RulesSection — saveRules envoie TOUTES les règles en BDD
  * ✅ Fix 4 : SquadsSection — parse via backend /api/admin/squad/parse
  * ✅ Fix 5 : nation-chip affiche ✅ + bordure verte si effectif complet
+ * ✅ Fix 6 : AdminLogin — guillemets JSX corrigés (plus de backslash-escape)
+ * ✅ Étape 1.2 : POST /squads/import-from-olympics (bouton + spinner + rapport)
+ * ✅ Étape 2.2 : Table effectifs éditable inline (double-clic = input, Entrée = save)
  */
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
@@ -45,17 +47,13 @@ function setAdminToken(t) {
   else localStorage.removeItem("boulzazen_admin_token");
 }
 
-// Fetch enveloppe avec timeout + injection Bearer token automatique
 async function adminFetch(endpoint, options = {}) {
   const token = getAdminToken();
-  const headers = {
-    ...(options.headers || {})
-  };
-  
+  const headers = { ...(options.headers || {}) };
+
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
-  // Si le body est un objet simple (pas un FormData), on met le Content-Type
   if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -207,9 +205,403 @@ function UsersSection() {
   );
 }
 
-// --- SECTION 2 : EFFECTIFS (REMPLACÉE PAR TON NOUVEAU CODE) ---
-function SquadsSection({ groqKey }) {  const [selectedNation, setSelectedNation] = useState(null);  const [inputMode,   setInputMode]   = useState("text");  const [promptText,  setPromptText]  = useState("");  const [imageData,   setImageData]   = useState(null);  const [imageName,   setImageName]   = useState("");  const [drag,        setDrag]        = useState(false);  const [players,     setPlayers]     = useState([]);  const [coachName,   setCoachName]   = useState("");  const [busy,        setBusy]        = useState(false);  const [importBusy,  setImportBusy]  = useState(false);  const [importReport,setImportReport]= useState(null);  const [fb,          setFb]          = useState(null);  const [filledNations, setFilledNations] = useState(new Set());  const [loadingFilled, setLoadingFilled] = useState(false);  // État pour l'édition inline (double-clic)  const [editingCell, setEditingCell] = useState(null); // { id, field }  const fileRef = useRef(null);  const showFb = (type, text, dur=5000) => {    setFb({type, text}); if(dur) setTimeout(() => setFb(null), dur);  };  const loadFilledNations = useCallback(async () => {    setLoadingFilled(true);    try {      const res = await adminFetch("/squad/filled-nations");      const data = await res.json();      if (res.ok && data.status === "success") {        setFilledNations(new Set(data.filled_nations || []));      }    } catch(e) {      console.error("Erreur chargement nations complètes:", e);    } finally {      setLoadingFilled(false);    }  }, []);  useEffect(() => { loadFilledNations(); }, [loadFilledNations]);  // ── Import Olympics ──────────────────────────────────────────────  const importFromOlympics = async () => {    setImportBusy(true);    setImportReport(null);    showFb("info", "🌐 Import depuis olympics.com en cours (peut prendre 30–60s)...", 0);    try {      const res  = await adminFetch("/squads/import-from-olympics", { method: "POST" });      const data = await res.json();      setImportReport(data);      if (data.status === "success" || data.status === "partial") {        showFb("ok", `✅ ${data.imported} nations importées (stratégie : ${data.strategy})`);        await loadFilledNations();      } else {        showFb("err", `❌ Import échoué : ${data.message}`);      }    } catch(e) {      showFb("err", "Erreur réseau : " + e.message);    } finally {      setImportBusy(false);    }  };  const handleImageDrop = useCallback((file) => {    if (!file || !file.type.startsWith("image/")) return;    const reader = new FileReader();    reader.onload = e => { setImageData(e.target.result); setImageName(file.name); };    reader.readAsDataURL(file);  }, []);  const addPlayer = () => setPlayers(prev => [...prev, { id: uid(), name: "", position: "M", price: 6.5 }]);  // ── Édition inline (double-clic → input, Entrée/blur → sauvegarde) ──  const startEdit = (id, field) => setEditingCell({ id, field });  const commitEdit = async (playerId, field, value, isNew) => {    setEditingCell(null);    // Mettre à jour l'état local d'abord    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, [field]: value } : p));    // Si le joueur a déjà été injecté en BDD (id numérique), on PATCH via l'API    if (!isNew && typeof playerId === "number") {      try {        const body = { [field]: field === "price" ? parseFloat(value) : value };        const res  = await adminFetch(`/players/${playerId}`, {          method: "PATCH",          body:   JSON.stringify(body),        });        if (!res.ok) {          const d = await res.json();          showFb("err", `❌ ${d.detail || "Erreur sauvegarde"}`);        }      } catch(e) {        showFb("err", "Erreur réseau patch : " + e.message);      }    }  };  const removePlayer = (id) => setPlayers(prev => prev.filter(p => p.id !== id));  const parseWithGroq = async () => {    if (!selectedNation) { showFb("err", "❌ Sélectionnez une nation."); return; }    const hasContent = inputMode === "text" ? promptText.trim().length > 5 : !!imageData;    if (!hasContent) { showFb("err", "❌ Fournissez du texte ou une capture d'écran."); return; }    setBusy(true);    showFb("info", "🤖 Groq analyse les données via le backend...", 0);    try {      let rawText = inputMode === "text"        ? `Nation: ${selectedNation}\n\n${promptText}`        : `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;      const res  = await adminFetch("/squad/parse", {        method: "POST",        body:   JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),      });      const data = await res.json();      if (!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");      const parsed = data.parsed_data;      if (!parsed) throw new Error("Données parsées vides");      if (parsed.coach_name) setCoachName(parsed.coach_name);      if (parsed.players && parsed.players.length > 0) {        setPlayers(parsed.players.map(p => ({ id: uid(), name: p.name || "", position: p.position || "M", price: p.price || 6.5 })));        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);      } else {        showFb("err", "⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");      }    } catch(e) {      showFb("err", "❌ Erreur : " + e.message);    } finally { setBusy(false); }  };  const injectSquad = async () => {    if (!selectedNation || players.length < 3) { showFb("err", "❌ Sélectionnez une nation et entrez au moins 3 joueurs."); return; }    setBusy(true);    showFb("info", "💾 Injection en base de données...", 0);    try {      const params = new URLSearchParams({ nation: selectedNation });      if (coachName) params.append("coach_name", coachName);      const res  = await adminFetch(`/squad/inject?${params}`, { method: "POST" });      const data = await res.json();      if (data.status === "success") {        showFb("ok", data.message || "Effectif enregistré !");        await loadFilledNations();      } else {        showFb("err", data.message || "Erreur serveur");      }    } catch(e) { showFb("err", "Erreur : " + e.message); }    finally { setBusy(false); }  };  // ── Cellule éditable ─────────────────────────────────────────────  const EditableCell = ({ playerId, field, value, isNew, type = "text", options }) => {    const isEditing = editingCell?.id === playerId && editingCell?.field === field;    const [draft, setDraft] = useState(value);    useEffect(() => { setDraft(value); }, [value]);    if (isEditing) {      if (options) {        return (          <select            className="pos-sel"            autoFocus            value={draft}            onChange={e => setDraft(e.target.value)}            onBlur={() => commitEdit(playerId, field, draft, isNew)}          >            {options.map(o => <option key={o}>{o}</option>)}          </select>        );      }      return (        <input          autoFocus          className={field === "price" ? "price-inp" : "name-inp"}          type={type}          step={type === "number" ? ".5" : undefined}          min={type === "number" ? "4" : undefined}          max={type === "number" ? "15" : undefined}          value={draft}          onChange={e => setDraft(e.target.value)}          onBlur={() => commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew)}          onKeyDown={e => {            if (e.key === "Enter") commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew);            if (e.key === "Escape") setEditingCell(null);          }}        />      );    }    return (      <span        style={{ cursor: "pointer", borderBottom: "1px dashed var(--border2)", padding: "2px 4px" }}        onDoubleClick={() => startEdit(playerId, field)}        title="Double-clic pour éditer"
-      >        {value}      </span>    );  };  const posCounts = POSITIONS.reduce((acc, p) => ({ ...acc, [p]: players.filter(pl => pl.position === p).length }), {});  const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;  return (    <div>      <p className="page-sub">        Sélectionnez une nation puis remplissez son effectif.{" "}        {loadingFilled          ? <span style={{ color: "var(--text3)" }}>Chargement...</span>          : <span style={{ color: "var(--green)" }}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>        }      </p>      <Feedback msg={fb} />      {/* ── BOUTON IMPORT OLYMPICS ── */}      <div className="card" style={{ marginBottom: 16 }}>        <div className="card-title">🌐 Import depuis olympics.com</div>        <p style={{ fontSize: ".8rem", color: "var(--text2)", marginBottom: 12, lineHeight: 1.6 }}>          Scrape automatiquement les effectifs officiels publiés sur olympics.com.          Utilise HTTP direct, puis l'IA si la page est bloquée.        </p>        <button          className="btn-action btn-blue"          onClick={importFromOlympics}          disabled={importBusy}          style={{ width: "100%" }}        >          {importBusy            ? <><span className="spinner" /> Import en cours (HTTP + IA)...</>            : "🌐 Importer depuis olympics.com"          }        </button>        {importReport && (          <div style={{            marginTop: 12,            background: importReport.status === "success" ? "rgba(0,255,170,.07)" : "rgba(255,204,68,.07)",            border: `1px solid ${importReport.status === "success" ? "rgba(0,255,170,.25)" : "rgba(255,204,68,.25)"}`,            borderRadius: 8, padding: "10px 14px",            fontSize: ".78rem", lineHeight: 1.6,          }}>            <div style={{ fontWeight: 700, marginBottom: 6 }}>              Rapport d'import — stratégie : <em>{importReport.strategy}</em>            </div>            <div>✅ {importReport.imported} nation(s) importée(s)</div>            {importReport.nations?.slice(0, 8).map(n => (              <div key={n.nation} style={{ color: "var(--text2)", paddingLeft: 8 }}>                • {n.nation} : {n.players} joueurs{n.coach ? `, coach : ${n.coach}` : ""}              </div>            ))}            {importReport.errors?.length > 0 && (              <div style={{ color: "var(--red)", marginTop: 6 }}>                ⚠️ Erreurs : {importReport.errors.slice(0, 3).join(" · ")}              </div>            )}            {!importReport.imported && (              <div style={{ color: "var(--gold)", marginTop: 6 }}>                ℹ️ {importReport.message}              </div>            )}          </div>        )}      </div>      {/* ── SÉLECTION NATION ── */}      <div className="card">        <div className="card-title">Sélection de la nation</div>        {Object.entries(NATIONS_CDM2026).map(([group, nations]) => (          <div key={group}>            <div className="group-label">{group}</div>            <div className="nation-grid">              {nations.map(n => {                const isFilled   = filledNations.has(n);                const isSelected = selectedNation === n;                return (                  <button key={n}                    className={`nation-chip ${isSelected ? "selected" : ""} ${isFilled ? "filled" : ""}`}                    onClick={() => { setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}>                    {isFilled && <span className="nation-chip-check">✅</span>}                    {n}                  </button>                );              })}            </div>          </div>        ))}      </div>      {selectedNation && (        <>          <div className="card">            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span></div>            <div className="upload-tabs">              <button className={`upload-tab ${inputMode === "text" ? "active" : ""}`} onClick={() => setInputMode("text")}>✏️ Texte</button>              <button className={`upload-tab ${inputMode === "image" ? "active" : ""}`} onClick={() => setInputMode("image")}>📷 Capture</button>            </div>            {inputMode === "text"              ? <div className="field">                  <label>Texte de l'effectif</label>                  <textarea placeholder={`Collez la liste de ${selectedNation} ici...`} value={promptText} onChange={e => setPromptText(e.target.value)} style={{ minHeight: 160 }} />                </div>              : <div className="field">                  <div className={`upload-zone ${drag ? "drag" : ""}`}                    onDragOver={e => { e.preventDefault(); setDrag(true); }}                    onDragLeave={() => setDrag(false)}                    onDrop={e => { e.preventDefault(); setDrag(false); handleImageDrop(e.dataTransfer.files[0]); }}                    onClick={() => fileRef.current?.click()}>                    <div style={{ fontSize: "2rem" }}>📷</div>                    <p>Glissez une capture ou cliquez</p>                    {imageName && <p style={{ color: "var(--green)", fontSize: ".75rem", marginTop: 6 }}>✅ {imageName}</p>}                    <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleImageDrop(e.target.files[0])} />                  </div>                  {imageData && <img src={imageData} alt="preview" style={{ maxHeight: 200, maxWidth: "100%", marginTop: 8, borderRadius: 6 }} />}                </div>            }            <div className="field row-2">              <div>                <label>Entraîneur (optionnel)</label>                <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e => setCoachName(e.target.value)} />              </div>              <div style={{ display: "flex", alignItems: "flex-end" }}>                <button className="btn-action btn-blue" style={{ width: "100%" }} onClick={parseWithGroq} disabled={busy}>                  {busy ? <><span className="spinner" /> Analyse...</> : "🤖 Parser avec Groq"}                </button>              </div>            </div>          </div>          {/* ── TABLE ÉDITABLE INLINE (double-clic) ── */}          <div className="card">            <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>              <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>              <div style={{ display: "flex", gap: 6 }}>                {POSITIONS.map(p => (                  <span key={p} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: ".68rem", color: "var(--text2)" }}>                    <span className={`pos-b ${p}`}>{p}</span>{posCounts[p]}                  </span>                ))}              </div>            </div>            <p style={{ fontSize: ".72rem", color: "var(--text3)", marginBottom: 10 }}>              💡 Double-clic sur une cellule pour l'éditer · Entrée pour valider            </p>            {players.length > 0 ? (              <table className="players-table">                <thead>                  <tr>                    <th>#</th>                    <th>Nom</th>                    <th>Poste</th>                    <th>Prix M€</th>                    <th></th>                  </tr>                </thead>                <tbody>                  {players.map((p, i) => {                    const isNew = typeof p.id === "string"; // uid() = string, BDD = number                    return (                      <tr key={p.id}>                        <td style={{ color: "var(--text3)", fontSize: ".72rem", width: 28 }}>{i + 1}</td>                        <td>                          <EditableCell playerId={p.id} field="name" value={p.name} isNew={isNew} />                        </td>                        <td>                          <EditableCell playerId={p.id} field="position" value={p.position} isNew={isNew} options={POSITIONS} />                        </td>                        <td>                          <EditableCell playerId={p.id} field="price" value={p.price} isNew={isNew} type="number" />                        </td>                        <td>                          <button className="btn-del" onClick={() => removePlayer(p.id)}>✕</button>                        </td>                      </tr>                    );                  })}                </tbody>              </table>            ) : (              <div style={{ textAlign: "center", padding: "32px", color: "var(--text3)", fontSize: ".82rem" }}>                Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.              </div>            )}            <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>            <div className="actions-strip">              <button className="btn-action btn-green" onClick={injectSquad} disabled={busy || players.length < 3}>                {busy ? <><span className="spinner" /> Injection...</> : "💾 Enregistrer en BDD"}              </button>              <button className="btn-action btn-ghost" onClick={() => { setPlayers([]); setCoachName(""); }}>Réinitialiser</button>            </div>          </div>        </>      )}    </div>  );}
+// --- SECTION 2 : EFFECTIFS ---
+function SquadsSection() {
+  const [selectedNation, setSelectedNation] = useState(null);
+  const [inputMode,    setInputMode]    = useState("text");
+  const [promptText,   setPromptText]   = useState("");
+  const [imageData,    setImageData]    = useState(null);
+  const [imageName,    setImageName]    = useState("");
+  const [drag,         setDrag]         = useState(false);
+  const [players,      setPlayers]      = useState([]);
+  const [coachName,    setCoachName]    = useState("");
+  const [busy,         setBusy]         = useState(false);
+  const [importBusy,   setImportBusy]   = useState(false);
+  const [importReport, setImportReport] = useState(null);
+  const [fb,           setFb]           = useState(null);
+  const [filledNations, setFilledNations] = useState(new Set());
+  const [loadingFilled, setLoadingFilled] = useState(false);
+
+  // État pour l'édition inline (double-clic)
+  const [editingCell, setEditingCell] = useState(null); // { id, field }
+  const fileRef = useRef(null);
+
+  const showFb = (type, text, dur = 5000) => {
+    setFb({type, text}); if (dur) setTimeout(() => setFb(null), dur);
+  };
+
+  const loadFilledNations = useCallback(async () => {
+    setLoadingFilled(true);
+    try {
+      const res = await adminFetch("/squad/filled-nations");
+      const data = await res.json();
+      if (res.ok && data.status === "success") {
+        setFilledNations(new Set(data.filled_nations || []));
+      }
+    } catch (e) {
+      console.error("Erreur chargement nations complètes:", e);
+    } finally {
+      setLoadingFilled(false);
+    }
+  }, []);
+
+  useEffect(() => { loadFilledNations(); }, [loadFilledNations]);
+
+  // ── Import Olympics (Étape 1.3) ──────────────────────────────────────────
+  const importFromOlympics = async () => {
+    setImportBusy(true);
+    setImportReport(null);
+    showFb("info", "🌐 Import depuis olympics.com en cours (peut prendre 30–60s)...", 0);
+    try {
+      const res  = await adminFetch("/squads/import-from-olympics", { method: "POST" });
+      const data = await res.json();
+      setImportReport(data);
+      if (data.status === "success" || data.status === "partial") {
+        showFb("ok", `✅ ${data.imported} nations importées (stratégie : ${data.strategy})`);
+        await loadFilledNations();
+      } else {
+        showFb("err", `❌ Import échoué : ${data.message}`);
+      }
+    } catch (e) {
+      showFb("err", "Erreur réseau : " + e.message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const handleImageDrop = useCallback((file) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = e => { setImageData(e.target.result); setImageName(file.name); };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const addPlayer = () => setPlayers(prev => [...prev, { id: uid(), name: "", position: "M", price: 6.5 }]);
+
+  // ── Édition inline (double-clic → input, Entrée/blur → sauvegarde) ──────
+  const startEdit = (id, field) => setEditingCell({ id, field });
+
+  const commitEdit = async (playerId, field, value, isNew) => {
+    setEditingCell(null);
+    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, [field]: value } : p));
+    // Si joueur déjà en BDD (id numérique), PATCH via l'API (Étape 2.2)
+    if (!isNew && typeof playerId === "number") {
+      try {
+        const body = { [field]: field === "price" ? parseFloat(value) : value };
+        const res  = await adminFetch(`/players/${playerId}`, {
+          method: "PATCH",
+          body:   JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const d = await res.json();
+          showFb("err", `❌ ${d.detail || "Erreur sauvegarde"}`);
+        }
+      } catch (e) {
+        showFb("err", "Erreur réseau patch : " + e.message);
+      }
+    }
+  };
+
+  const removePlayer = (id) => setPlayers(prev => prev.filter(p => p.id !== id));
+
+  const parseWithGroq = async () => {
+    if (!selectedNation) { showFb("err", "❌ Sélectionnez une nation."); return; }
+    const hasContent = inputMode === "text" ? promptText.trim().length > 5 : !!imageData;
+    if (!hasContent) { showFb("err", "❌ Fournissez du texte ou une capture d'écran."); return; }
+    setBusy(true);
+    showFb("info", "🤖 Groq analyse les données via le backend...", 0);
+    try {
+      const rawText = inputMode === "text"
+        ? `Nation: ${selectedNation}\n\n${promptText}`
+        : `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;
+      const res  = await adminFetch("/squad/parse", {
+        method: "POST",
+        body:   JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");
+      const parsed = data.parsed_data;
+      if (!parsed) throw new Error("Données parsées vides");
+      if (parsed.coach_name) setCoachName(parsed.coach_name);
+      if (parsed.players && parsed.players.length > 0) {
+        setPlayers(parsed.players.map(p => ({ id: uid(), name: p.name || "", position: p.position || "M", price: p.price || 6.5 })));
+        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);
+      } else {
+        showFb("err", "⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");
+      }
+    } catch (e) {
+      showFb("err", "❌ Erreur : " + e.message);
+    } finally { setBusy(false); }
+  };
+
+  const injectSquad = async () => {
+    if (!selectedNation || players.length < 3) { showFb("err", "❌ Sélectionnez une nation et entrez au moins 3 joueurs."); return; }
+    setBusy(true);
+    showFb("info", "💾 Injection en base de données...", 0);
+    try {
+      const params = new URLSearchParams({ nation: selectedNation });
+      if (coachName) params.append("coach_name", coachName);
+      // Envoyer les joueurs dans le body JSON (liste)
+      const res = await adminFetch(`/squad/inject?${params}`, {
+        method: "POST",
+        body: JSON.stringify(players.map(p => ({ name: p.name, position: p.position, price: p.price }))),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        showFb("ok", data.message || "Effectif enregistré !");
+        await loadFilledNations();
+      } else {
+        showFb("err", data.message || "Erreur serveur");
+      }
+    } catch (e) { showFb("err", "Erreur : " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  // ── Cellule éditable (Étape 2.2) ─────────────────────────────────────────
+  const EditableCell = ({ playerId, field, value, isNew, type = "text", options }) => {
+    const isEditing = editingCell?.id === playerId && editingCell?.field === field;
+    const [draft, setDraft] = useState(value);
+    useEffect(() => { setDraft(value); }, [value]);
+
+    if (isEditing) {
+      if (options) {
+        return (
+          <select
+            className="pos-sel"
+            autoFocus
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onBlur={() => commitEdit(playerId, field, draft, isNew)}
+          >
+            {options.map(o => <option key={o}>{o}</option>)}
+          </select>
+        );
+      }
+      return (
+        <input
+          autoFocus
+          className={field === "price" ? "price-inp" : "name-inp"}
+          type={type}
+          step={type === "number" ? ".5" : undefined}
+          min={type === "number" ? "4" : undefined}
+          max={type === "number" ? "15" : undefined}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={() => commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew)}
+          onKeyDown={e => {
+            if (e.key === "Enter") commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew);
+            if (e.key === "Escape") setEditingCell(null);
+          }}
+        />
+      );
+    }
+
+    return (
+      <span
+        style={{ cursor: "pointer", borderBottom: "1px dashed var(--border2)", padding: "2px 4px" }}
+        onDoubleClick={() => startEdit(playerId, field)}
+        title="Double-clic pour éditer"
+      >
+        {value}
+      </span>
+    );
+  };
+
+  const posCounts = POSITIONS.reduce((acc, p) => ({ ...acc, [p]: players.filter(pl => pl.position === p).length }), {});
+  const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;
+
+  return (
+    <div>
+      <p className="page-sub">
+        Sélectionnez une nation puis remplissez son effectif.{" "}
+        {loadingFilled
+          ? <span style={{ color: "var(--text3)" }}>Chargement...</span>
+          : <span style={{ color: "var(--green)" }}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>
+        }
+      </p>
+      <Feedback msg={fb} />
+
+      {/* ── BOUTON IMPORT OLYMPICS (Étape 1.3) ── */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">🌐 Import depuis olympics.com</div>
+        <p style={{ fontSize: ".8rem", color: "var(--text2)", marginBottom: 12, lineHeight: 1.6 }}>
+          Scrape automatiquement les effectifs officiels publiés sur olympics.com.
+          Utilise HTTP direct, puis l'IA si la page est bloquée.
+        </p>
+        <button
+          className="btn-action btn-blue"
+          onClick={importFromOlympics}
+          disabled={importBusy}
+          style={{ width: "100%" }}
+        >
+          {importBusy
+            ? <><span className="spinner" /> Import en cours (HTTP + IA)...</>
+            : "🌐 Importer depuis olympics.com"
+          }
+        </button>
+
+        {importReport && (
+          <div style={{
+            marginTop: 12,
+            background: importReport.status === "success" ? "rgba(0,255,170,.07)" : "rgba(255,204,68,.07)",
+            border: `1px solid ${importReport.status === "success" ? "rgba(0,255,170,.25)" : "rgba(255,204,68,.25)"}`,
+            borderRadius: 8, padding: "10px 14px",
+            fontSize: ".78rem", lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>
+              Rapport d'import — stratégie : <em>{importReport.strategy}</em>
+            </div>
+            <div>✅ {importReport.imported} nation(s) importée(s)</div>
+            {importReport.nations?.slice(0, 8).map(n => (
+              <div key={n.nation} style={{ color: "var(--text2)", paddingLeft: 8 }}>
+                • {n.nation} : {n.players} joueurs{n.coach ? `, coach : ${n.coach}` : ""}
+              </div>
+            ))}
+            {importReport.errors?.length > 0 && (
+              <div style={{ color: "var(--red)", marginTop: 6 }}>
+                ⚠️ Erreurs : {importReport.errors.slice(0, 3).join(" · ")}
+              </div>
+            )}
+            {!importReport.imported && (
+              <div style={{ color: "var(--gold)", marginTop: 6 }}>
+                ℹ️ {importReport.message}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── SÉLECTION NATION ── */}
+      <div className="card">
+        <div className="card-title">Sélection de la nation</div>
+        {Object.entries(NATIONS_CDM2026).map(([group, nations]) => (
+          <div key={group}>
+            <div className="group-label">{group}</div>
+            <div className="nation-grid">
+              {nations.map(n => {
+                const isFilled   = filledNations.has(n);
+                const isSelected = selectedNation === n;
+                return (
+                  <button key={n}
+                    className={`nation-chip ${isSelected ? "selected" : ""} ${isFilled ? "filled" : ""}`}
+                    onClick={() => { setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}>
+                    {isFilled && <span className="nation-chip-check">✅</span>}
+                    {n}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {selectedNation && (
+        <>
+          <div className="card">
+            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span></div>
+            <div className="upload-tabs">
+              <button className={`upload-tab ${inputMode === "text" ? "active" : ""}`} onClick={() => setInputMode("text")}>✏️ Texte</button>
+              <button className={`upload-tab ${inputMode === "image" ? "active" : ""}`} onClick={() => setInputMode("image")}>📷 Capture</button>
+            </div>
+            {inputMode === "text"
+              ? <div className="field">
+                  <label>Texte de l'effectif</label>
+                  <textarea placeholder={`Collez la liste de ${selectedNation} ici...`} value={promptText} onChange={e => setPromptText(e.target.value)} style={{ minHeight: 160 }} />
+                </div>
+              : <div className="field">
+                  <div className={`upload-zone ${drag ? "drag" : ""}`}
+                    onDragOver={e => { e.preventDefault(); setDrag(true); }}
+                    onDragLeave={() => setDrag(false)}
+                    onDrop={e => { e.preventDefault(); setDrag(false); handleImageDrop(e.dataTransfer.files[0]); }}
+                    onClick={() => fileRef.current?.click()}>
+                    <div style={{ fontSize: "2rem" }}>📷</div>
+                    <p>Glissez une capture ou cliquez</p>
+                    {imageName && <p style={{ color: "var(--green)", fontSize: ".75rem", marginTop: 6 }}>✅ {imageName}</p>}
+                    <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleImageDrop(e.target.files[0])} />
+                  </div>
+                  {imageData && <img src={imageData} alt="preview" style={{ maxHeight: 200, maxWidth: "100%", marginTop: 8, borderRadius: 6 }} />}
+                </div>
+            }
+            <div className="field row-2">
+              <div>
+                <label>Entraîneur (optionnel)</label>
+                <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e => setCoachName(e.target.value)} />
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button className="btn-action btn-blue" style={{ width: "100%" }} onClick={parseWithGroq} disabled={busy}>
+                  {busy ? <><span className="spinner" /> Analyse...</> : "🤖 Parser avec Groq"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ── TABLE ÉDITABLE INLINE (Étape 2.2) ── */}
+          <div className="card">
+            <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {POSITIONS.map(p => (
+                  <span key={p} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: ".68rem", color: "var(--text2)" }}>
+                    <span className={`pos-b ${p}`}>{p}</span>{posCounts[p]}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <p style={{ fontSize: ".72rem", color: "var(--text3)", marginBottom: 10 }}>
+              💡 Double-clic sur une cellule pour l'éditer · Entrée pour valider
+            </p>
+            {players.length > 0 ? (
+              <table className="players-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Nom</th>
+                    <th>Poste</th>
+                    <th>Prix M€</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {players.map((p, i) => {
+                    const isNew = typeof p.id === "string"; // uid() = string, BDD = number
+                    return (
+                      <tr key={p.id}>
+                        <td style={{ color: "var(--text3)", fontSize: ".72rem", width: 28 }}>{i + 1}</td>
+                        <td>
+                          <EditableCell playerId={p.id} field="name" value={p.name} isNew={isNew} />
+                        </td>
+                        <td>
+                          <EditableCell playerId={p.id} field="position" value={p.position} isNew={isNew} options={POSITIONS} />
+                        </td>
+                        <td>
+                          <EditableCell playerId={p.id} field="price" value={p.price} isNew={isNew} type="number" />
+                        </td>
+                        <td>
+                          <button className="btn-del" onClick={() => removePlayer(p.id)}>✕</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ textAlign: "center", padding: "32px", color: "var(--text3)", fontSize: ".82rem" }}>
+                Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.
+              </div>
+            )}
+            <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>
+            <div className="actions-strip">
+              <button className="btn-action btn-green" onClick={injectSquad} disabled={busy || players.length < 3}>
+                {busy ? <><span className="spinner" /> Injection...</> : "💾 Enregistrer en BDD"}
+              </button>
+              <button className="btn-action btn-ghost" onClick={() => { setPlayers([]); setCoachName(""); }}>Réinitialiser</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 // --- SECTION 3 : CALENDRIER & RÉSULTATS ---
 function MatchesSection() {
@@ -359,8 +751,12 @@ function RulesSection() {
       <div className="card">
         <div className="card-title">Parser le barème de points via IA</div>
         <div className="field">
-          <textarea placeholder="Collez le texte brut contenant vos règles de points (ex: Un but de gardien rapporte 10pts, un clean sheet 4pts...)"
-            value={rawRules} onChange={e=>setRawRules(e.target.value)} style={{ minHeight: "100px" }} />
+          <textarea
+            placeholder="Collez le texte brut contenant vos règles de points..."
+            value={rawRules}
+            onChange={e => setRawRules(e.target.value)}
+            style={{ minHeight: "100px" }}
+          />
         </div>
         <button className="btn-action btn-blue" onClick={parseRulesText} disabled={busy}>🤖 Extraire le barème structuré</button>
       </div>
@@ -404,17 +800,15 @@ function ToolsSection() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    // Vérification dynamique de la configuration Groq côté backend
     fetch(`${API_BASE}/api/scraping/status`)
       .then(res => res.json())
       .then(data => setStatus(data))
       .catch(e => console.error(e));
 
-    // Chargement des logs d'administration
     setLoading(true);
     adminFetch("/logs?limit=30")
       .then(res => res.json())
-      .then(data => { if(data.status==="success") setLogs(data.logs || []); })
+      .then(data => { if (data.status === "success") setLogs(data.logs || []); })
       .catch(e => console.error(e))
       .finally(() => setLoading(false));
   }, []);
@@ -425,10 +819,14 @@ function ToolsSection() {
         <div>
           <div className="card-title">Statut Serveur & IA</div>
           <p style={{ fontSize: ".85rem", marginBottom: "6px" }}>
-            Moteur de scraping : {status?.scraper_status === "functional" ? <span style={{color:"var(--green)"}}>🟢 Opérationnel</span> : <span>⚪ Inconnu</span>}
+            Moteur de scraping : {status?.scraper_status === "functional"
+              ? <span style={{ color: "var(--green)" }}>🟢 Opérationnel</span>
+              : <span>⚪ Inconnu</span>}
           </p>
           <p style={{ fontSize: ".85rem" }}>
-            Configuration Groq (Backend) : {status?.groq_configured ? <span style={{color:"var(--green)"}}>🔒 Configurée (.env)</span> : <span style={{color:"var(--red)"}}>❌ Manquante</span>}
+            Configuration Groq (Backend) : {status?.groq_configured
+              ? <span style={{ color: "var(--green)" }}>🔒 Configurée (.env)</span>
+              : <span style={{ color: "var(--red)" }}>❌ Manquante</span>}
           </p>
         </div>
       </div>
@@ -438,7 +836,7 @@ function ToolsSection() {
           <div style={{ maxHeight: "350px", overflowY: "auto", fontSize: ".8rem", fontFamily: "monospace", background: "var(--bg)", padding: "10px", borderRadius: "6px", border: "1px solid var(--border)" }}>
             {logs.map(l => (
               <div key={l.id} style={{ marginBottom: "6px", borderBottom: "1px dashed var(--border2)", paddingBottom: "4px" }}>
-                <span style={{ color: "var(--text3)" }}>[{l.timestamp?.substring(11,19)}]</span>{" "}
+                <span style={{ color: "var(--text3)" }}>[{l.timestamp?.substring(11, 19)}]</span>{" "}
                 <span style={{ color: "var(--gold)", fontWeight: "bold" }}>{l.action.toUpperCase()}</span>{" "}
                 <span style={{ color: "var(--text2)" }}>({l.target})</span> — {l.details}
               </div>
@@ -451,7 +849,7 @@ function ToolsSection() {
   );
 }
 
-// --- SOUS-COMPOSANT LOGIN FORM ---
+// --- LOGIN FORM (bug corrigé : plus de guillemets échappés) ---
 function AdminLogin({ onLoginSuccess }) {
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
@@ -486,11 +884,21 @@ function AdminLogin({ onLoginSuccess }) {
     <div className="login-wrap">
       <form className="login-box" onSubmit={submit}>
         <div className="login-logo">Fantasy <span>⚡</span> Admin</div>
-        <div><label>Pseudo</label><input className="inp" type="text" placeholder="admin" value={user} onChange={e=>setUser(e.target.value)} required/></div>
-        <div><label>Mot de passe</label><input className="inp" type="password" placeholder="••••••" value={pass} onChange={e=>setPass(e.target.value)} required/></div>
-        {err&&<p className="err-msg">⚠ {err}</p>}
+        <div>
+          <label>Pseudo</label>
+          <input className="inp" type="text" placeholder="admin" value={user} onChange={e => setUser(e.target.value)} required />
+        </div>
+        <div>
+          <label>Mot de passe</label>
+          <input className="inp" type="password" placeholder="••••••" value={pass} onChange={e => setPass(e.target.value)} required />
+        </div>
+        {err && <p className="err-msg">⚠ {err}</p>}
+        {/* ✅ FIX : guillemets JSX normaux, pas de backslash-escape */}
         <button className="btn-primary" type="submit" disabled={busy}>
-          {busy?<><span className="spinner" style={{borderTopColor:\"#fff\"}}/> Connexion...</>:\"Se connecter\"}
+          {busy
+            ? <><span className="spinner" style={{ borderTopColor: "#fff" }} /> Connexion...</>
+            : "Se connecter"
+          }
         </button>
         <p className="hint">admin / admin00</p>
       </form>
@@ -503,10 +911,10 @@ function AdminLogin({ onLoginSuccess }) {
 // ════════════════════════════════════════════════════════════════════════════
 
 export default function AdminPanel() {
-  const [token, setToken] = useState(()=>getAdminToken());
+  const [token, setToken] = useState(() => getAdminToken());
   const [tab, setTab] = useState("squads");
 
-  const handleLogout = ()=>{
+  const handleLogout = () => {
     setAdminToken(null); setToken("");
     window.dispatchEvent(new Event("storage"));
   };
@@ -517,39 +925,37 @@ export default function AdminPanel() {
 
   return (
     <div className="admin-layout">
-      {/* Sidebar de navigation gauche */}
       <aside className="admin-aside">
         <div className="admin-brand">Boulzazen <span>⚡</span> Admin</div>
         <nav className="admin-nav">
-          <button className={`nav-item ${tab==="squads"?"active":""}`} onClick={()=>setTab("squads")}>🏃‍♂️ Effectifs & Scraping</button>
-          <button className={`nav-item ${tab==="users"?"active":""}`} onClick={()=>setTab("users")}>👥 Gestion Utilisateurs</button>
-          <button className={`nav-item ${tab==="matches"?"active":""}`} onClick={()=>setTab("matches")}>📅 Calendrier Matches</button>
-          <button className={`nav-item ${tab==="rules"?"active":""}`} onClick={()=>setTab("rules")}>📜 Barème de Points</button>
-          <button className={`nav-item ${tab==="tools"?"active":""}`} onClick={()=>setTab("tools")}>⚙️ Serveur & Audits</button>
+          <button className={`nav-item ${tab === "squads" ? "active" : ""}`} onClick={() => setTab("squads")}>🏃‍♂️ Effectifs & Scraping</button>
+          <button className={`nav-item ${tab === "users" ? "active" : ""}`} onClick={() => setTab("users")}>👥 Gestion Utilisateurs</button>
+          <button className={`nav-item ${tab === "matches" ? "active" : ""}`} onClick={() => setTab("matches")}>📅 Calendrier Matches</button>
+          <button className={`nav-item ${tab === "rules" ? "active" : ""}`} onClick={() => setTab("rules")}>📜 Barème de Points</button>
+          <button className={`nav-item ${tab === "tools" ? "active" : ""}`} onClick={() => setTab("tools")}>⚙️ Serveur & Audits</button>
         </nav>
         <div style={{ padding: "0 15px", marginTop: "auto" }}>
           <button className="btn-logout" onClick={handleLogout}>🚪 Déconnexion</button>
         </div>
       </aside>
 
-      {/* Conteneur principal de la vue active */}
       <main className="admin-main">
         <header className="admin-header">
           <h1>
-            {tab === "squads" && "🏃‍♂️ Gestion des Effectifs & Scrapers"}
-            {tab === "users" && "👥 Comptes Utilisateurs & Synchro"}
+            {tab === "squads"  && "🏃‍♂️ Gestion des Effectifs & Scrapers"}
+            {tab === "users"   && "👥 Comptes Utilisateurs & Synchro"}
             {tab === "matches" && "📅 Planification du Calendrier"}
-            {tab === "rules" && "📜 Barème de Points & Règles IA"}
-            {tab === "tools" && "⚙️ Outils Système & Logs d'Audit"}
+            {tab === "rules"   && "📜 Barème de Points & Règles IA"}
+            {tab === "tools"   && "⚙️ Outils Système & Logs d'Audit"}
           </h1>
         </header>
 
         <section className="admin-body">
-          {tab === "squads" && <SquadsSection />}
-          {tab === "users" && <UsersSection />}
+          {tab === "squads"  && <SquadsSection />}
+          {tab === "users"   && <UsersSection />}
           {tab === "matches" && <MatchesSection />}
-          {tab === "rules" && <RulesSection />}
-          {tab === "tools" && <ToolsSection />}
+          {tab === "rules"   && <RulesSection />}
+          {tab === "tools"   && <ToolsSection />}
         </section>
       </main>
     </div>

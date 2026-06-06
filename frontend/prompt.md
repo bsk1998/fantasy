@@ -27,3 +27,5 @@ PATCH /api/admin/points/{player_id}  # override manuel admin
 
 voilà où on sait arreter :
 etape 1-1; j'ai cree  le fichier scraper 
+j'ai essayer avec etape 1-2 et 1-3 , verifie C:\Users\kong2\Desktop\fantasy-gaming-wc2026\frontend\src\views\AdminPanel.jsx 
+et  C:\Users\kong2\Desktop\fantasy-gaming-wc2026\backend\app\admin_routes.py

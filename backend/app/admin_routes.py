@@ -1,12 +1,3 @@
-admin_routes.py — Routes d'administration
-===========================================
-v4.0 — Corrections critiques :
-  ✅ /ai/effectif accepte JSON body (texte) ET FormData (image)
-     sans conflit de Content-Type
-  ✅ /squad/inject reçoit les joueurs en body JSON (liste)
-  ✅ Tous les imports présents (Optional, List, Union, etc.)
-"""
-
 import logging
 import secrets
 from fastapi import (
