@@ -1,4 +1,3 @@
-"""
 admin_routes.py — Routes d'administration
 ===========================================
 v4.0 — Corrections critiques :
@@ -723,6 +722,168 @@ async def update_rule(req: RuleUpdateRequest, admin: dict = Depends(verify_admin
         _log_action(action, "rule", target_id=req.rule_name, details=f"Points: {req.points_value}")
         return {"status": "success", "message": f"✅ Règle {req.rule_name} sauvegardée",
                 "rule": {"id": rule.id, "name": rule.rule_name, "points": rule.points_value}}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+#  IMPORT DEPUIS OLYMPICS.COM — POST /squads/import-from-olympics
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/squads/import-from-olympics")
+async def import_from_olympics(admin: dict = Depends(verify_admin)):
+    """
+    Lance le scraper olympics.com, parse les données et insère en BDD
+    avec flag source = "olympics".
+    """
+    from app.scraper import import_squads_from_olympics
+    from app.admin_services import inject_team_nation
+    db = SessionLocal()
+    try:
+        # Tentative de scraping HTTP + fallback IA
+        squads, message, strategy = await import_squads_from_olympics(ai_service=ai_service)
+        if not squads:
+            return {
+                "status": "error",
+                "message": message,
+                "strategy": strategy,
+                "imported": 0,
+            }
+
+        imported_nations = []
+        errors = []
+
+        for squad in squads:
+            try:
+                players_data = [
+                    {
+                        "name":     p.name,
+                        "position": p.position,
+                        "price":    p.price,
+                        "club":     p.club,
+                        "number":   p.number,
+                        "source":   "olympics",   # flag source
+                    }
+                    for p in squad.players
+                ]
+                coach_name = squad.coach.name if squad.coach else None
+                result = inject_team_nation(db, squad.nation, coach_name, players_data)
+                imported_nations.append({
+                    "nation":   squad.nation,
+                    "players":  result["players_inserted"],
+                    "coach":    result["coach"],
+                })
+            except Exception as e:
+                errors.append(f"{squad.nation}: {e}")
+
+        _log_action(
+            "olympics_import",
+            "squad",
+            target_id=f"{len(imported_nations)} nations",
+            details=f"strategy={strategy}, {message}",
+        )
+
+        return {
+            "status":   "success" if imported_nations else "partial",
+            "message":  message,
+            "strategy": strategy,
+            "imported": len(imported_nations),
+            "nations":  imported_nations,
+            "errors":   errors,
+        }
+    except Exception as e:
+        logger.exception("import_from_olympics error")
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+#  ÉDITION MANUELLE — PATCH /players/{id} et PATCH /coaches/{id}
+# ════════════════════════════════════════════════════════════════════
+
+class PlayerPatchRequest(BaseModel):
+    name:        Optional[str]   = None
+    position:    Optional[str]   = None
+    price:       Optional[float] = None
+    nationality: Optional[str]   = None
+
+class CoachPatchRequest(BaseModel):
+    name:        Optional[str]   = None
+    price:       Optional[float] = None
+    nationality: Optional[str]   = None
+
+@router.patch("/players/{player_id}")
+async def patch_player(
+    player_id: int,
+    req: PlayerPatchRequest,
+    admin: dict = Depends(verify_admin),
+):
+    """Édition inline d'un joueur (nom, poste, prix, nation)."""
+    db = SessionLocal()
+    try:
+        player = db.query(Player).filter(Player.id == player_id).first()
+        if not player:
+            raise HTTPException(404, f"Joueur #{player_id} introuvable")
+        if req.name        is not None: player.name        = req.name.strip()
+        if req.position    is not None: player.position    = req.position.upper().strip()
+        if req.price       is not None: player.price       = req.price
+        if req.nationality is not None: player.nationality = req.nationality.strip()
+        db.commit()
+        _log_action("player_patched", "player", target_id=str(player_id),
+                    details=req.model_dump(exclude_none=True).__str__())
+        return {
+            "status": "success",
+            "player": {
+                "id":          player.id,
+                "name":        player.name,
+                "position":    player.position,
+                "price":       player.price,
+                "nationality": player.nationality,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, str(e))
+    finally:
+        db.close()
+
+@router.patch("/coaches/{coach_id}")
+async def patch_coach(
+    coach_id: int,
+    req: CoachPatchRequest,
+    admin: dict = Depends(verify_admin),
+):
+    """Édition inline d'un entraîneur (nom, prix, nation)."""
+    db = SessionLocal()
+    try:
+        coach = db.query(Coach).filter(Coach.id == coach_id).first()
+        if not coach:
+            raise HTTPException(404, f"Entraîneur #{coach_id} introuvable")
+        if req.name        is not None: coach.name        = req.name.strip()
+        if req.price       is not None: coach.price       = req.price
+        if req.nationality is not None:
+            coach.nationality = req.nationality.strip()
+            coach.team_name   = req.nationality.strip()
+        db.commit()
+        _log_action("coach_patched", "coach", target_id=str(coach_id),
+                    details=req.model_dump(exclude_none=True).__str__())
+        return {
+            "status": "success",
+            "coach": {
+                "id":          coach.id,
+                "name":        coach.name,
+                "price":       coach.price,
+                "nationality": coach.nationality,
+            },
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))

@@ -2,7 +2,7 @@
  * AdminPanel.jsx — Panneau d'administration Fantasy Boulzazen WC 2026
  * ====================================================================
  * ✅ Fix 1 : ToolsSection vérifie groq_configure depuis /api/scraping/status
- *            au lieu de vérifier la clé localStorage
+ * au lieu de vérifier la clé localStorage
  * ✅ Fix 2 : UsersSection — token Bearer transmis correctement via adminFetch
  * ✅ Fix 3 : RulesSection — saveRules envoie TOUTES les règles en BDD, pas une seule
  * ✅ Fix 4 : SquadsSection — parse via backend /api/admin/squad/parse
@@ -21,515 +21,182 @@ const NATIONS_CDM2026 = {
   "Groupe B": ["Canada","Bosnie-Herzégovine","Qatar","Suisse"],
   "Groupe C": ["Brésil","Maroc","Haïti","Écosse"],
   "Groupe D": ["États-Unis d'Amérique","Paraguay","Australie","Türkiye"],
-  "Groupe E": ["Allemagne","Curaçao","Côte d'Ivoire","Équateur"],
-  "Groupe F": ["Pays-Bas","Japon","Suède","Tunisie"],
-  "Groupe G": ["Belgique","Égypte","République islamique d'Iran","Nouvelle-Zélande"],
-  "Groupe H": ["Espagne","Cabo Verde","Arabie saoudite","Uruguay"],
-  "Groupe I": ["France","Sénégal","Iraq","Norvège"],
-  "Groupe J": ["Argentine","Algérie","Autriche","Jordanie"],
-  "Groupe K": ["Portugal","République démocratique du Congo","Ouzbékistan","Colombie"],
-  "Groupe L": ["Angleterre","Croatie","Ghana","Panama"],
+  "Groupe E": ["Allemagne","Colombie","Nouvelle-Zélande","Irak"],
+  "Groupe F": ["Italie","Cameroun","Pérou","Fidji"],
+  "Groupe G": ["Espagne","Algérie","Émirats Arabes Unis","Pologne"],
+  "Groupe H": ["Angleterre","Égypte","Oman","Slovaquie"],
+  "Groupe I": ["Portugal","Mali","Chine","Jamaïque"],
+  "Groupe J": ["Pays-Bas","Côte d'Ivoire","Arabie Saoudite","Costa Rica"],
+  "Groupe K": ["Argentine","Ghana","Japon","Panama"],
+  "Groupe L": ["France","Nigeria","Iran","Honduras"]
 };
 
 const ALL_NATIONS = Object.values(NATIONS_CDM2026).flat();
-const POSITIONS   = ["G","D","M","A"];
-
-// ─── Règles par défaut ────────────────────────────────────────────────────────
-const DEFAULT_RULES = {
-  fantasy: [
-    { id:"f1", label:"Match complet (≥90 min)", G:2, D:2, M:2, A:2 },
-    { id:"f2", label:"Joue <90 min / entre en jeu", G:1, D:1, M:1, A:1 },
-    { id:"f3", label:"But marqué", G:8, D:6, M:5, A:4 },
-    { id:"f4", label:"Passe décisive", G:6, D:5, M:4, A:4 },
-    { id:"f5", label:"Clean sheet (0 but encaissé)", G:5, D:4, M:1, A:0 },
-    { id:"f6", label:"3 parades (gardien, par tranche)", G:3, D:0, M:0, A:0 },
-    { id:"f7", label:"5 récupérations (G/D/M, par tranche)", G:3, D:3, M:3, A:0 },
-    { id:"f8", label:"Carton jaune", G:-1, D:-1, M:-1, A:-1 },
-    { id:"f9", label:"Carton rouge", G:-2, D:-2, M:-2, A:-2 },
-  ],
-  coach: [
-    { id:"c1", label:"Présent sur le banc", pts:1, note:"" },
-    { id:"c2", label:"Victoire (base)", pts:2, note:"" },
-    { id:"c3", label:"Bonus par tranche de 2 buts d'écart (victoire)", pts:3, note:"Ex: 4-0 = +2+6 = 8pts" },
-    { id:"c4", label:"Défaite (base)", pts:-2, note:"Logique inverse de la victoire" },
-    { id:"c5", label:"But d'un remplaçant entré", pts:3, note:"" },
-    { id:"c6", label:"Passe décisive d'un remplaçant", pts:2, note:"" },
-    { id:"c7", label:"Carton jaune", pts:-1, note:"" },
-    { id:"c8", label:"Carton rouge", pts:-2, note:"" },
-  ],
-  pronos: [
-    { id:"p1", label:"Score exact", pts:5 },
-    { id:"p2", label:"Bon vainqueur / match nul (mauvais score)", pts:2 },
-    { id:"p3", label:"Mauvais pronostic", pts:0 },
-  ],
-  bracket: [
-    { id:"b1", label:"Bon classement exact dans un groupe", pts:5 },
-    { id:"b2", label:"Équipe qualifiée au bon rang (incl. meilleur 3e)", pts:5 },
-    { id:"b3", label:"Équipe présente dans un tour éliminatoire", pts:5 },
-    { id:"b4", label:"Match prédit exactement (bon résultat)", pts:5 },
-    { id:"b5", label:"Équipe qualifiée au tour suivant", pts:5 },
-  ],
-  annexes: [
-    { id:"a1", label:"1er exact dans un Top 3", pts:5 },
-    { id:"a2", label:"Joueur présent dans le bon Top 3", pts:3 },
-    { id:"a3", label:"Joueur présent dans un Top 3 (mauvais rang)", pts:1 },
-  ],
-};
-
-const MODE_LABELS = {
-  fantasy:"⚽ Fantasy League", coach:"👔 Entraîneur",
-  pronos:"🎯 Pronostics Scores", bracket:"🗺️ Tableau Tournoi",
-  annexes:"🎖️ Prédictions Annexes",
-};
-
-const KNOCKOUT_DEFS = [
-  { key:"r32", label:"Huitièmes de finale", count:8 },
-  { key:"qf",  label:"Quarts de finale",    count:4 },
-  { key:"sf",  label:"Demi-finales",        count:2 },
-  { key:"tp",  label:"Match pour la 3e place", count:1 },
-  { key:"f",   label:"🏆 Finale",           count:1 },
-];
+const POSITIONS   = ["G", "D", "M", "A"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function getAdminToken()      { return localStorage.getItem("admin_token") || ""; }
-function setAdminToken(t)     { t ? localStorage.setItem("admin_token",t) : localStorage.removeItem("admin_token"); }
-function getStoredGroqKey()   { return localStorage.getItem("admin_groq_key") || ""; }
-function setStoredGroqKey(k)  { k ? localStorage.setItem("admin_groq_key",k) : localStorage.removeItem("admin_groq_key"); }
-function uid()                { return Math.random().toString(36).slice(2,8); }
+const uid = () => Math.random().toString(36).substring(2, 9);
 
-async function adminFetch(path, opts={}) {
+function getAdminToken() {
+  return localStorage.getItem("boulzazen_admin_token") || "";
+}
+function setAdminToken(t) {
+  if (t) localStorage.setItem("boulzazen_admin_token", t);
+  else localStorage.removeItem("boulzazen_admin_token");
+}
+
+// Fetch enveloppe avec timeout + injection Bearer token automatique
+async function adminFetch(endpoint, options = {}) {
   const token = getAdminToken();
-  const ctrl  = new AbortController();
-  const tid   = setTimeout(() => ctrl.abort(), API_TIMEOUT);
+  const headers = {
+    ...(options.headers || {})
+  };
+  
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  // Si le body est un objet simple (pas un FormData), on met le Content-Type
+  if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), API_TIMEOUT);
+
   try {
-    const res = await fetch(`${API_BASE}/api/admin${path}`, {
-      ...opts,
-      headers: {
-        "Content-Type":"application/json",
-        ...(token ? { Authorization:`Bearer ${token}` } : {}),
-        ...(opts.headers || {}),
-      },
-      signal: ctrl.signal,
+    const res = await fetch(`${API_BASE}/api/admin${endpoint}`, {
+      ...options,
+      headers,
+      signal: controller.signal
     });
-    clearTimeout(tid);
+    clearTimeout(id);
     return res;
-  } catch(e) { clearTimeout(tid); throw e; }
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
+  }
 }
 
-// ─── CSS ──────────────────────────────────────────────────────────────────────
-const css = `
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600&display=swap');
-:root{
-  --bg:#08090f;--s1:#0f111a;--s2:#171929;--s3:#1e2235;
-  --border:#252a40;--border2:#303860;
-  --text:#e8ebff;--text2:#7a82ab;--text3:#3d4466;
-  --green:#00ffaa;--green2:#00cc88;
-  --blue:#4f8bff;--blue2:#2563eb;
-  --gold:#ffcc44;--red:#ff4d6d;--orange:#ff8c42;
-  --radius:10px;--radius2:6px;
-  font-family:'DM Sans',sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--text);min-height:100vh;}
-.admin-root{min-height:100vh;display:flex;flex-direction:column;background:var(--bg);}
-
-/* LOGIN */
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 20%,#0d1540 0%,var(--bg) 70%);}
-.login-box{width:340px;background:var(--s1);border:1px solid var(--border2);border-radius:16px;padding:36px;display:flex;flex-direction:column;gap:20px;}
-.login-logo{font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;letter-spacing:.15em;text-transform:uppercase;text-align:center;color:var(--text);}
-.login-logo span{color:var(--green);}
-.inp{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:10px 14px;color:var(--text);font-size:.9rem;outline:none;transition:.2s;}
-.inp:focus{border-color:var(--blue);}
-.btn-primary{width:100%;background:var(--blue);color:#fff;border:none;border-radius:var(--radius2);padding:12px;font-weight:700;font-size:.9rem;cursor:pointer;transition:.2s;}
-.btn-primary:hover{background:var(--blue2);}
-.btn-primary:disabled{opacity:.4;cursor:not-allowed;}
-.err-msg{font-size:.78rem;color:var(--red);text-align:center;}
-.hint{font-size:.7rem;color:var(--text3);text-align:center;}
-
-/* LAYOUT */
-.admin-layout{display:flex;height:100vh;overflow:hidden;}
-.sidebar{width:220px;flex-shrink:0;background:var(--s1);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:20px 12px;gap:4px;overflow-y:auto;}
-.sidebar-logo{font-family:'Syne',sans-serif;font-size:1rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:8px 10px 20px;color:var(--text);}
-.sidebar-logo span{color:var(--green);}
-.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--radius2);cursor:pointer;font-size:.83rem;font-weight:600;color:var(--text2);transition:.15s;border:none;background:none;width:100%;text-align:left;}
-.nav-item:hover{background:var(--s2);color:var(--text);}
-.nav-item.active{background:rgba(79,139,255,.15);color:var(--blue);border:1px solid rgba(79,139,255,.25);}
-.nav-item .icon{font-size:1rem;width:18px;text-align:center;}
-.sidebar-bottom{margin-top:auto;padding-top:12px;border-top:1px solid var(--border);}
-.btn-logout{width:100%;background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.25);border-radius:var(--radius2);padding:8px;color:var(--red);font-size:.78rem;font-weight:700;cursor:pointer;transition:.2s;}
-.btn-logout:hover{background:rgba(255,77,109,.2);}
-
-/* MAIN */
-.main-content{flex:1;overflow-y:auto;padding:28px 28px 40px;}
-.page-title{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;letter-spacing:.08em;margin-bottom:6px;text-transform:uppercase;}
-.page-sub{font-size:.8rem;color:var(--text2);margin-bottom:24px;}
-
-/* FEEDBACK */
-.feedback{padding:10px 16px;border-radius:var(--radius2);font-size:.82rem;font-weight:600;margin-bottom:16px;}
-.feedback.ok{background:rgba(0,255,170,.08);border:1px solid rgba(0,255,170,.25);color:var(--green);}
-.feedback.err{background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);color:var(--red);}
-.feedback.info{background:rgba(79,139,255,.08);border:1px solid rgba(79,139,255,.25);color:var(--blue);}
-.feedback.warn{background:rgba(255,204,68,.08);border:1px solid rgba(255,204,68,.25);color:var(--gold);}
-
-/* CARDS */
-.card{background:var(--s1);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px;}
-.card-title{font-family:'Syne',sans-serif;font-size:.95rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;margin-bottom:14px;color:var(--text);}
-.card-title span{color:var(--text3);font-weight:400;font-size:.75rem;margin-left:8px;text-transform:none;letter-spacing:0;}
-
-/* FORMS */
-label{display:block;font-size:.7rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--text2);margin-bottom:5px;}
-.field{margin-bottom:14px;}
-.row-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
-select{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:9px 12px;color:var(--text);font-size:.85rem;outline:none;}
-select:focus{border-color:var(--blue);}
-textarea{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:10px 14px;color:var(--text);font-size:.82rem;resize:vertical;outline:none;min-height:120px;font-family:'DM Sans',sans-serif;}
-textarea:focus{border-color:var(--blue);}
-
-/* GROQ */
-.groq-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:50px;font-size:.72rem;font-weight:700;letter-spacing:.05em;}
-.groq-badge.on{background:rgba(0,255,170,.1);border:1px solid rgba(0,255,170,.3);color:var(--green);}
-.groq-badge.off{background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.3);color:var(--red);}
-.groq-dot{width:7px;height:7px;border-radius:50%;background:currentColor;}
-.groq-dot.pulse{animation:pulse 1.4s ease-in-out infinite;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-
-/* NATIONS */
-.group-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);padding:12px 0 5px;}
-.nation-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:4px;}
-.nation-chip{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:7px 12px;font-size:.8rem;font-weight:600;cursor:pointer;transition:.15s;color:var(--text2);text-align:left;display:flex;align-items:center;gap:6px;}
-.nation-chip:hover{border-color:var(--border2);color:var(--text);}
-.nation-chip.selected{background:rgba(79,139,255,.12);border-color:rgba(79,139,255,.4);color:var(--blue);}
-.nation-chip.filled{border-color:rgba(0,255,170,.45);color:var(--green);background:rgba(0,255,170,.06);}
-.nation-chip.selected.filled{border-color:var(--blue);background:rgba(79,139,255,.15);color:var(--blue);}
-.nation-chip-check{font-size:.75rem;flex-shrink:0;}
-
-/* UPLOAD */
-.upload-zone{border:2px dashed var(--border2);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:.2s;background:var(--s2);}
-.upload-zone:hover,.upload-zone.drag{border-color:var(--blue);background:rgba(79,139,255,.06);}
-.upload-zone p{font-size:.82rem;color:var(--text2);margin-top:6px;}
-.upload-tabs{display:flex;gap:4px;background:var(--s2);border:1px solid var(--border);border-radius:50px;padding:3px;margin-bottom:14px;}
-.upload-tab{flex:1;background:none;border:none;color:var(--text2);padding:7px;font-size:.78rem;font-weight:700;border-radius:50px;cursor:pointer;transition:.15s;}
-.upload-tab.active{background:var(--s3);color:var(--text);border:1px solid var(--border2);}
-
-/* PLAYERS TABLE */
-.players-table{width:100%;border-collapse:collapse;font-size:.8rem;}
-.players-table th{text-align:left;padding:7px 10px;color:var(--text3);font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-bottom:1px solid var(--border);}
-.players-table td{padding:6px 10px;border-bottom:1px solid rgba(37,42,64,.6);vertical-align:middle;}
-.players-table tr:hover td{background:var(--s2);}
-.pos-sel{background:var(--s3);border:1px solid var(--border);border-radius:4px;padding:3px 6px;color:var(--text);font-size:.75rem;}
-.name-inp{background:var(--s3);border:1px solid transparent;border-radius:4px;padding:4px 7px;color:var(--text);font-size:.8rem;width:100%;}
-.name-inp:focus{border-color:var(--blue);outline:none;}
-.price-inp{background:var(--s3);border:1px solid transparent;border-radius:4px;padding:4px 6px;color:var(--text);font-size:.78rem;width:72px;}
-.price-inp:focus{border-color:var(--blue);outline:none;}
-.btn-del{background:none;border:none;color:var(--red);cursor:pointer;font-size:.9rem;opacity:.5;transition:.15s;}
-.btn-del:hover{opacity:1;}
-.btn-add-row{display:flex;align-items:center;gap:6px;background:none;border:1px dashed var(--border2);border-radius:var(--radius2);padding:7px 14px;color:var(--text2);font-size:.78rem;font-weight:600;cursor:pointer;width:100%;margin-top:8px;transition:.15s;}
-.btn-add-row:hover{border-color:var(--blue);color:var(--blue);}
-
-/* POS BADGE */
-.pos-b{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;font-size:.65rem;font-weight:800;}
-.pos-b.G{background:rgba(255,204,68,.15);color:var(--gold);}
-.pos-b.D{background:rgba(79,139,255,.15);color:var(--blue);}
-.pos-b.M{background:rgba(0,255,170,.12);color:var(--green);}
-.pos-b.A{background:rgba(255,77,109,.15);color:var(--red);}
-
-/* USERS TABLE */
-.users-table{width:100%;border-collapse:collapse;font-size:.82rem;}
-.users-table th{text-align:left;padding:8px 12px;color:var(--text3);font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-bottom:1px solid var(--border);}
-.users-table td{padding:9px 12px;border-bottom:1px solid rgba(37,42,64,.5);vertical-align:middle;}
-.users-table tr:hover td{background:var(--s2);}
-.user-avatar{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--green));display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:.75rem;color:#000;flex-shrink:0;}
-.score-pill{display:inline-flex;align-items:center;gap:3px;background:rgba(0,255,170,.08);border:1px solid rgba(0,255,170,.2);border-radius:50px;padding:2px 8px;font-size:.72rem;font-weight:700;color:var(--green);}
-.btn-danger-sm{background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.3);border-radius:var(--radius2);padding:5px 10px;color:var(--red);font-size:.72rem;font-weight:700;cursor:pointer;transition:.2s;}
-.btn-danger-sm:hover{background:rgba(255,77,109,.25);}
-
-/* LEAGUE */
-.league-hero{background:linear-gradient(135deg,#0b1e45 0%,#071530 100%);border:1px solid var(--border2);border-radius:var(--radius);padding:20px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:16px;}
-.league-badge{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:800;letter-spacing:.08em;color:var(--gold);}
-.league-meta{font-size:.75rem;color:var(--text2);margin-top:4px;}
-.league-count{text-align:right;flex-shrink:0;}
-.league-count-val{font-family:'Syne',sans-serif;font-size:2.2rem;font-weight:700;color:var(--green);line-height:1;}
-.league-count-lbl{font-size:.65rem;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;}
-.ranking-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;}
-.ranking-tab{background:var(--s2);border:1px solid var(--border);border-radius:50px;padding:6px 14px;font-size:.75rem;font-weight:700;cursor:pointer;color:var(--text2);transition:.15s;}
-.ranking-tab.active{background:rgba(79,139,255,.12);border-color:rgba(79,139,255,.35);color:var(--blue);}
-.rank-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid rgba(37,42,64,.4);}
-.rank-row:last-child{border-bottom:none;}
-.rank-row:hover{background:var(--s2);}
-.rank-num{width:28px;text-align:center;font-size:.85rem;flex-shrink:0;font-weight:700;color:var(--text3);}
-.rank-medal{font-size:1.1rem;}
-.rank-name{flex:1;font-weight:700;font-size:.88rem;}
-.rank-score{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;text-align:right;flex-shrink:0;}
-.rank-breakdown{font-size:.68rem;color:var(--text2);margin-top:2px;}
-
-/* TOURNAMENT */
-.group-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:14px;margin-bottom:10px;}
-.group-card-title{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--blue);margin-bottom:10px;}
-.ko-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);overflow:hidden;margin-bottom:10px;}
-.ko-header{padding:8px 14px;font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--orange);background:rgba(255,140,66,.06);border-bottom:1px solid var(--border);}
-.ko-match{display:grid;grid-template-columns:1fr auto 1fr auto;gap:6px;align-items:center;padding:8px 14px;border-bottom:1px solid rgba(37,42,64,.5);}
-.ko-match:last-child{border-bottom:none;}
-.ko-team-inp{width:100%;background:var(--s3);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:.78rem;}
-.ko-vs{font-size:.7rem;color:var(--text3);flex-shrink:0;}
-.ko-winner-inp{width:110px;background:rgba(0,255,170,.07);border:1px solid rgba(0,255,170,.2);border-radius:4px;padding:5px 8px;color:var(--green);font-size:.75rem;font-weight:700;}
-
-/* RULES */
-.mode-tab-bar{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;}
-.mode-tab{background:var(--s2);border:1px solid var(--border);border-radius:50px;padding:6px 14px;font-size:.75rem;font-weight:700;cursor:pointer;color:var(--text2);transition:.15s;}
-.mode-tab.active{background:rgba(79,139,255,.12);border-color:rgba(79,139,255,.35);color:var(--blue);}
-.rules-table{width:100%;border-collapse:collapse;font-size:.8rem;}
-.rules-table th{text-align:left;padding:7px 10px;color:var(--text3);font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-bottom:1px solid var(--border);}
-.rules-table td{padding:7px 10px;border-bottom:1px solid rgba(37,42,64,.5);vertical-align:middle;}
-.rules-table tr:hover td{background:var(--s2);}
-.rule-inp{width:100%;background:var(--s3);border:1px solid transparent;border-radius:4px;padding:4px 8px;color:var(--text);font-size:.8rem;}
-.rule-inp:focus{border-color:var(--blue);outline:none;}
-.pts-inp{width:52px;background:var(--s3);border:1px solid transparent;border-radius:4px;padding:4px 6px;color:var(--text);font-size:.82rem;font-weight:700;text-align:center;}
-.pts-inp:focus{border-color:var(--green);outline:none;}
-.pts-cell{text-align:center;}
-
-/* ACTIONS */
-.actions-strip{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;}
-.btn-action{display:inline-flex;align-items:center;gap:6px;border:none;border-radius:var(--radius2);padding:9px 18px;font-weight:700;font-size:.82rem;cursor:pointer;transition:.2s;}
-.btn-green{background:var(--green);color:#000;}
-.btn-green:hover{background:var(--green2);}
-.btn-blue{background:var(--blue);color:#fff;}
-.btn-blue:hover{background:var(--blue2);}
-.btn-ghost{background:var(--s2);color:var(--text);border:1px solid var(--border2);}
-.btn-ghost:hover{background:var(--s3);}
-.btn-sm{padding:5px 12px;font-size:.75rem;}
-.btn-action:disabled{opacity:.4;cursor:not-allowed;}
-.btn-save-rules{display:inline-flex;align-items:center;gap:6px;background:var(--green);color:#000;border:none;border-radius:var(--radius2);padding:9px 18px;font-weight:800;font-size:.82rem;cursor:pointer;transition:.2s;}
-.btn-save-rules:hover{background:var(--green2);}
-
-/* CONFIRM MODAL */
-.confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:center;justify-content:center;}
-.confirm-box{background:var(--s1);border:1px solid var(--border2);border-radius:var(--radius);padding:28px;max-width:360px;width:90%;display:flex;flex-direction:column;gap:16px;}
-.confirm-title{font-family:'Syne',sans-serif;font-size:1rem;font-weight:800;color:var(--text);}
-.confirm-msg{font-size:.82rem;color:var(--text2);line-height:1.6;}
-.confirm-actions{display:flex;gap:8px;}
-
-/* SPINNER */
-.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.2);border-top-color:currentColor;border-radius:50%;animation:spin .7s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* SCROLLBAR */
-::-webkit-scrollbar{width:4px;}
-::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
-
-.key-display{font-family:monospace;font-size:.78rem;background:var(--s3);border:1px solid var(--border);border-radius:4px;padding:6px 12px;color:var(--text2);word-break:break-all;}
-.search-bar{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:8px 12px;color:var(--text);font-size:.85rem;outline:none;margin-bottom:14px;}
-.search-bar:focus{border-color:var(--blue);}
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;}
-.stat-card{background:var(--s2);border:1px solid var(--border);border-radius:var(--radius2);padding:12px;text-align:center;}
-.stat-val{font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:700;line-height:1;}
-.stat-lbl{font-size:.65rem;color:var(--text3);font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-top:3px;}
-`;
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SOUS-COMPOSANTS GÉNÉRIQUES
-// ════════════════════════════════════════════════════════════════════════════
-
+// ─── Composants réutilisables UI ──────────────────────────────────────────────
 function Feedback({ msg }) {
   if (!msg) return null;
-  return <div className={`feedback ${msg.type}`}>{msg.text}</div>;
-}
-
-function ConfirmDialog({ title, message, onConfirm, onCancel }) {
-  return (
-    <div className="confirm-overlay">
-      <div className="confirm-box">
-        <div className="confirm-title">⚠️ {title}</div>
-        <div className="confirm-msg">{message}</div>
-        <div className="confirm-actions">
-          <button className="btn-action btn-ghost" style={{flex:1}} onClick={onCancel}>Annuler</button>
-          <button className="btn-action" style={{flex:1,background:"var(--red)",color:"#fff"}} onClick={onConfirm}>Supprimer</button>
-        </div>
-      </div>
-    </div>
-  );
+  const cls = msg.type === "ok" ? "fb-ok" : msg.type === "err" ? "fb-err" : "fb-info";
+  return <div className={`feedback-bar ${cls}`}>{msg.text}</div>;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Paramètres
+//  SECTIONS DU PANEL
 // ════════════════════════════════════════════════════════════════════════════
 
-function SettingsSection({ groqKey, onGroqKeyChange }) {
-  const [draft, setDraft] = useState(groqKey);
-  const [show,  setShow]  = useState(false);
-  const [busy,  setBusy]  = useState(false);
-  const [fb,    setFb]    = useState(null);
-
-  const handleSave = async () => {
-    setBusy(true); setFb(null);
-    const k = draft.trim();
-    if (!k.startsWith("gsk_") && k.length > 0) {
-      setFb({ type:"err", text:"❌ Clé invalide — une clé Groq commence par « gsk_ »." });
-      setBusy(false); return;
-    }
-    try {
-      await adminFetch("/status");
-      setStoredGroqKey(k); onGroqKeyChange(k);
-      setFb({ type:"ok", text: k ? "✅ Clé Groq activée et sauvegardée." : "✅ Clé supprimée." });
-    } catch(e) {
-      setFb({ type:"err", text:`Erreur backend : ${e.message}` });
-    } finally { setBusy(false); }
-  };
-
-  const active = !!groqKey;
-  return (
-    <div>
-      <p className="page-sub">Configurez la clé API Groq pour activer le scraping IA.</p>
-      <Feedback msg={fb} />
-      <div className="card">
-        <div className="card-title">Clé API Groq
-          <span><span className={`groq-badge ${active?"on":"off"}`}><span className={`groq-dot ${active?"pulse":""}`}/>{active?"Activée":"Désactivée"}</span></span>
-        </div>
-        <div className="field">
-          <label>Clé Groq (gsk_…)</label>
-          <div style={{display:"flex",gap:8}}>
-            <input className="inp" type={show?"text":"password"} placeholder="gsk_xxxxxxxxxxxxxxxxxxxx" value={draft} onChange={e=>setDraft(e.target.value)} style={{flex:1}}/>
-            <button className="btn-action btn-ghost btn-sm" onClick={()=>setShow(!show)}>{show?"🙈":"👁️"}</button>
-          </div>
-        </div>
-        {active && <div className="field"><label>Clé actuelle</label><div className="key-display">{groqKey.slice(0,12)}…{groqKey.slice(-6)}</div></div>}
-        <div className="actions-strip">
-          <button className="btn-action btn-green" onClick={handleSave} disabled={busy}>{busy&&<span className="spinner"/>} Enregistrer</button>
-          {active&&<button className="btn-action btn-ghost" onClick={()=>{setDraft("");setStoredGroqKey("");onGroqKeyChange("");}}>Désactiver</button>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Utilisateurs
-//  ✅ Fix : adminFetch inclut déjà le Bearer token — le problème était que
-//           la route backend nécessite verify_admin(). On s'assure que le
-//           token est bien présent en localStorage avant de charger.
-// ════════════════════════════════════════════════════════════════════════════
-
+// --- SECTION 1 : UTILISATEURS ---
 function UsersSection() {
-  const [users,    setUsers]   = useState([]);
-  const [loading,  setLoading] = useState(false);
-  const [fb,       setFb]      = useState(null);
-  const [search,   setSearch]  = useState("");
-  const [confirm,  setConfirm] = useState(null);
-  const [busy,     setBusy]    = useState(false);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [fb, setFb] = useState(null);
 
-  const showFb = (type, text, dur=5000) => {
-    setFb({type,text}); if(dur) setTimeout(()=>setFb(null), dur);
-  };
+  const showFb = (type, text) => { setFb({type, text}); setTimeout(() => setFb(null), 4000); };
 
   const loadUsers = async () => {
-    const token = getAdminToken();
-    if (!token) {
-      showFb("err", "❌ Non authentifié. Reconnectez-vous en tant qu'admin.");
-      return;
-    }
     setLoading(true);
     try {
-      const res  = await adminFetch("/users");
-      // adminFetch lance déjà avec le Bearer token via getAdminToken()
-      if (res.status === 401) {
-        showFb("err", "❌ Session admin expirée. Veuillez vous reconnecter.");
-        setAdminToken("");
-        setLoading(false);
-        return;
-      }
+      const res = await adminFetch("/users");
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Erreur chargement");
-      setUsers(data.users || []);
-      if ((data.users || []).length === 0) {
-        showFb("info", "ℹ️ Aucun compte utilisateur inscrit pour le moment.");
+      if (res.ok && data.status === "success") {
+        setUsers(data.users || []);
+      } else {
+        showFb("err", data.detail || "Impossible de récupérer les utilisateurs");
       }
-    } catch(e) {
-      showFb("err", "❌ Impossible de charger les utilisateurs : " + e.message);
-    } finally { setLoading(false); }
+    } catch (e) {
+      showFb("err", "Erreur réseau: " + e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { loadUsers(); }, []);
 
-  const handleDelete = async () => {
-    if(!confirm) return;
-    setBusy(true);
+  const deleteUser = async (id, name) => {
+    if (!window.confirm(`⚠️ ATTENTION ! Supprimer définitivement l'utilisateur ${name} ? Toutes ses prédictions et équipes fantasy seront effacées.`)) return;
     try {
-      const res  = await adminFetch(`/users/${confirm.id}`, { method:"DELETE" });
+      const res = await adminFetch(`/users/${id}`, { method: "DELETE" });
       const data = await res.json();
-      if(!res.ok) throw new Error(data.detail || "Suppression refusée");
-      showFb("ok", data.message);
-      setUsers(prev => prev.filter(u => u.id !== confirm.id));
-    } catch(e) {
-      showFb("err", "❌ " + e.message);
-    } finally { setBusy(false); setConfirm(null); }
+      if (res.ok && data.status === "success") {
+        showFb("ok", data.message);
+        loadUsers();
+      } else {
+        showFb("err", data.detail || "Erreur lors de la suppression");
+      }
+    } catch (e) {
+      showFb("err", "Erreur réseau: " + e.message);
+    }
   };
 
-  const filtered = users.filter(u =>
-    (u.username||"").toLowerCase().includes(search.toLowerCase()) ||
-    (u.email||"").toLowerCase().includes(search.toLowerCase())
-  );
+  const syncGeneralLeague = async () => {
+    try {
+      showFb("info", "Synchronisation de la ligue générale...");
+      const res = await adminFetch("/leagues/general/sync", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.status === "success") {
+        showFb("ok", data.message);
+      } else {
+        showFb("err", data.detail || "Erreur de synchro");
+      }
+    } catch (e) {
+      showFb("err", "Erreur réseau: " + e.message);
+    }
+  };
 
-  const totalUsers   = users.length;
-  const totalFantasy = users.reduce((s, u) => s + (u.score_fantasy||0), 0);
-  const topUser      = users.reduce((best, u) => (!best || u.total > best.total) ? u : best, null);
+  const initGeneralLeague = async () => {
+    try {
+      showFb("info", "Création de la ligue générale...");
+      const res = await adminFetch("/leagues/general", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.status === "success") {
+        showFb("ok", data.message);
+      } else {
+        showFb("err", data.detail || "Erreur d'initialisation");
+      }
+    } catch (e) {
+      showFb("err", "Erreur réseau: " + e.message);
+    }
+  };
 
   return (
     <div>
-      <p className="page-sub">Gérez les comptes inscrits sur la ligue.</p>
-      <Feedback msg={fb} />
-      {confirm && (
-        <ConfirmDialog
-          title="Supprimer ce compte ?"
-          message={`Vous allez supprimer définitivement le compte de « ${confirm.username || confirm.email} » et toutes ses données. Cette action est irréversible.`}
-          onConfirm={handleDelete}
-          onCancel={() => setConfirm(null)}
-        />
-      )}
-      <div className="stats-row">
-        <div className="stat-card"><div className="stat-val" style={{color:"var(--blue)"}}>{totalUsers}</div><div className="stat-lbl">Membres</div></div>
-        <div className="stat-card"><div className="stat-val" style={{color:"var(--green)"}}>{totalFantasy}</div><div className="stat-lbl">Pts Fantasy total</div></div>
-        <div className="stat-card"><div className="stat-val" style={{color:"var(--gold)",fontSize:"1rem"}}>{topUser?.username || "—"}</div><div className="stat-lbl">Leader actuel</div></div>
-        <div className="stat-card"><div className="stat-val" style={{color:"var(--orange)"}}>{topUser?.total || 0}</div><div className="stat-lbl">Pts leader</div></div>
+      <div style={{ display: "flex", gap: "10px", marginBottom: "15px" }}>
+        <button className="btn-action btn-blue" onClick={initGeneralLeague}>🛡️ Init Ligue Générale</button>
+        <button className="btn-action btn-ghost" onClick={syncGeneralLeague}>🔄 Sync Ligue Générale</button>
       </div>
+      <Feedback msg={fb} />
       <div className="card">
-        <div className="card-title" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span>Comptes inscrits <span>({filtered.length}/{totalUsers})</span></span>
-          <button className="btn-action btn-ghost btn-sm" onClick={loadUsers} disabled={loading}>
-            {loading?<><span className="spinner"/> Chargement</>:"🔄 Actualiser"}
-          </button>
-        </div>
-        <input className="search-bar" placeholder="🔍 Rechercher par pseudo ou email..." value={search} onChange={e=>setSearch(e.target.value)} />
-        {loading ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Chargement...</div>
-        ) : filtered.length === 0 && users.length === 0 ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
-            Aucun compte inscrit. Les utilisateurs apparaîtront ici dès leur inscription.
-          </div>
-        ) : filtered.length === 0 ? (
-          <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>
-            Aucun résultat pour « {search} ».
-          </div>
-        ) : (
-          <table className="users-table">
-            <thead><tr><th>Compte</th><th>Fantasy</th><th>Scores</th><th>Bracket</th><th>Annexes</th><th style={{textAlign:"right"}}>Total</th><th></th></tr></thead>
+        <div className="card-title">Comptes Joueurs ({users.length})</div>
+        {loading ? <p>Chargement des utilisateurs...</p> : (
+          <table className="players-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Pseudo / Email</th>
+                <th>Fantasy</th>
+                <th>Scores</th>
+                <th>Tableaux</th>
+                <th>Annexes</th>
+                <th>Total</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
             <tbody>
-              {filtered.map(u => (
+              {users.map(u => (
                 <tr key={u.id}>
+                  <td>{u.id}</td>
+                  <td><strong>{u.username || u.email}</strong></td>
+                  <td>{u.score_fantasy} pts</td>
+                  <td>{u.score_predictor_scores} pts</td>
+                  <td>{u.score_predictor_tableaux} pts</td>
+                  <td>{u.score_top_individuel} pts</td>
+                  <td style={{ color: "var(--gold)", fontWeight: "bold" }}>{u.total} pts</td>
                   <td>
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      <div className="user-avatar">{(u.username||u.email||"?")[0].toUpperCase()}</div>
-                      <div>
-                        <div style={{fontWeight:700,fontSize:".85rem"}}>{u.username || "—"}</div>
-                        <div style={{fontSize:".7rem",color:"var(--text3)"}}>{u.email}</div>
-                      </div>
-                    </div>
+                    <button className="btn-del" onClick={() => deleteUser(u.id, u.username || u.email)}>✕ Supprimer</button>
                   </td>
-                  <td><span style={{color:"var(--green)",fontWeight:700}}>{u.score_fantasy}</span></td>
-                  <td><span style={{color:"var(--blue)",fontWeight:700}}>{u.score_predictor_scores}</span></td>
-                  <td><span style={{color:"var(--gold)",fontWeight:700}}>{u.score_predictor_tableaux}</span></td>
-                  <td><span style={{color:"#a78bfa",fontWeight:700}}>{u.score_top_individuel}</span></td>
-                  <td style={{textAlign:"right"}}><span className="score-pill">⭐ {u.total} pts</span></td>
-                  <td><button className="btn-danger-sm" onClick={()=>setConfirm(u)} disabled={busy}>🗑️ Supprimer</button></td>
                 </tr>
               ))}
             </tbody>
@@ -540,788 +207,279 @@ function UsersSection() {
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Ligue Générale
-// ════════════════════════════════════════════════════════════════════════════
+// --- SECTION 2 : EFFECTIFS (REMPLACÉE PAR TON NOUVEAU CODE) ---
+function SquadsSection({ groqKey }) {  const [selectedNation, setSelectedNation] = useState(null);  const [inputMode,   setInputMode]   = useState("text");  const [promptText,  setPromptText]  = useState("");  const [imageData,   setImageData]   = useState(null);  const [imageName,   setImageName]   = useState("");  const [drag,        setDrag]        = useState(false);  const [players,     setPlayers]     = useState([]);  const [coachName,   setCoachName]   = useState("");  const [busy,        setBusy]        = useState(false);  const [importBusy,  setImportBusy]  = useState(false);  const [importReport,setImportReport]= useState(null);  const [fb,          setFb]          = useState(null);  const [filledNations, setFilledNations] = useState(new Set());  const [loadingFilled, setLoadingFilled] = useState(false);  // État pour l'édition inline (double-clic)  const [editingCell, setEditingCell] = useState(null); // { id, field }  const fileRef = useRef(null);  const showFb = (type, text, dur=5000) => {    setFb({type, text}); if(dur) setTimeout(() => setFb(null), dur);  };  const loadFilledNations = useCallback(async () => {    setLoadingFilled(true);    try {      const res = await adminFetch("/squad/filled-nations");      const data = await res.json();      if (res.ok && data.status === "success") {        setFilledNations(new Set(data.filled_nations || []));      }    } catch(e) {      console.error("Erreur chargement nations complètes:", e);    } finally {      setLoadingFilled(false);    }  }, []);  useEffect(() => { loadFilledNations(); }, [loadFilledNations]);  // ── Import Olympics ──────────────────────────────────────────────  const importFromOlympics = async () => {    setImportBusy(true);    setImportReport(null);    showFb("info", "🌐 Import depuis olympics.com en cours (peut prendre 30–60s)...", 0);    try {      const res  = await adminFetch("/squads/import-from-olympics", { method: "POST" });      const data = await res.json();      setImportReport(data);      if (data.status === "success" || data.status === "partial") {        showFb("ok", `✅ ${data.imported} nations importées (stratégie : ${data.strategy})`);        await loadFilledNations();      } else {        showFb("err", `❌ Import échoué : ${data.message}`);      }    } catch(e) {      showFb("err", "Erreur réseau : " + e.message);    } finally {      setImportBusy(false);    }  };  const handleImageDrop = useCallback((file) => {    if (!file || !file.type.startsWith("image/")) return;    const reader = new FileReader();    reader.onload = e => { setImageData(e.target.result); setImageName(file.name); };    reader.readAsDataURL(file);  }, []);  const addPlayer = () => setPlayers(prev => [...prev, { id: uid(), name: "", position: "M", price: 6.5 }]);  // ── Édition inline (double-clic → input, Entrée/blur → sauvegarde) ──  const startEdit = (id, field) => setEditingCell({ id, field });  const commitEdit = async (playerId, field, value, isNew) => {    setEditingCell(null);    // Mettre à jour l'état local d'abord    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, [field]: value } : p));    // Si le joueur a déjà été injecté en BDD (id numérique), on PATCH via l'API    if (!isNew && typeof playerId === "number") {      try {        const body = { [field]: field === "price" ? parseFloat(value) : value };        const res  = await adminFetch(`/players/${playerId}`, {          method: "PATCH",          body:   JSON.stringify(body),        });        if (!res.ok) {          const d = await res.json();          showFb("err", `❌ ${d.detail || "Erreur sauvegarde"}`);        }      } catch(e) {        showFb("err", "Erreur réseau patch : " + e.message);      }    }  };  const removePlayer = (id) => setPlayers(prev => prev.filter(p => p.id !== id));  const parseWithGroq = async () => {    if (!selectedNation) { showFb("err", "❌ Sélectionnez une nation."); return; }    const hasContent = inputMode === "text" ? promptText.trim().length > 5 : !!imageData;    if (!hasContent) { showFb("err", "❌ Fournissez du texte ou une capture d'écran."); return; }    setBusy(true);    showFb("info", "🤖 Groq analyse les données via le backend...", 0);    try {      let rawText = inputMode === "text"        ? `Nation: ${selectedNation}\n\n${promptText}`        : `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;      const res  = await adminFetch("/squad/parse", {        method: "POST",        body:   JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),      });      const data = await res.json();      if (!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");      const parsed = data.parsed_data;      if (!parsed) throw new Error("Données parsées vides");      if (parsed.coach_name) setCoachName(parsed.coach_name);      if (parsed.players && parsed.players.length > 0) {        setPlayers(parsed.players.map(p => ({ id: uid(), name: p.name || "", position: p.position || "M", price: p.price || 6.5 })));        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);      } else {        showFb("err", "⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");      }    } catch(e) {      showFb("err", "❌ Erreur : " + e.message);    } finally { setBusy(false); }  };  const injectSquad = async () => {    if (!selectedNation || players.length < 3) { showFb("err", "❌ Sélectionnez une nation et entrez au moins 3 joueurs."); return; }    setBusy(true);    showFb("info", "💾 Injection en base de données...", 0);    try {      const params = new URLSearchParams({ nation: selectedNation });      if (coachName) params.append("coach_name", coachName);      const res  = await adminFetch(`/squad/inject?${params}`, { method: "POST" });      const data = await res.json();      if (data.status === "success") {        showFb("ok", data.message || "Effectif enregistré !");        await loadFilledNations();      } else {        showFb("err", data.message || "Erreur serveur");      }    } catch(e) { showFb("err", "Erreur : " + e.message); }    finally { setBusy(false); }  };  // ── Cellule éditable ─────────────────────────────────────────────  const EditableCell = ({ playerId, field, value, isNew, type = "text", options }) => {    const isEditing = editingCell?.id === playerId && editingCell?.field === field;    const [draft, setDraft] = useState(value);    useEffect(() => { setDraft(value); }, [value]);    if (isEditing) {      if (options) {        return (          <select            className="pos-sel"            autoFocus            value={draft}            onChange={e => setDraft(e.target.value)}            onBlur={() => commitEdit(playerId, field, draft, isNew)}          >            {options.map(o => <option key={o}>{o}</option>)}          </select>        );      }      return (        <input          autoFocus          className={field === "price" ? "price-inp" : "name-inp"}          type={type}          step={type === "number" ? ".5" : undefined}          min={type === "number" ? "4" : undefined}          max={type === "number" ? "15" : undefined}          value={draft}          onChange={e => setDraft(e.target.value)}          onBlur={() => commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew)}          onKeyDown={e => {            if (e.key === "Enter") commitEdit(playerId, field, type === "number" ? parseFloat(draft) || 6.5 : draft, isNew);            if (e.key === "Escape") setEditingCell(null);          }}        />      );    }    return (      <span        style={{ cursor: "pointer", borderBottom: "1px dashed var(--border2)", padding: "2px 4px" }}        onDoubleClick={() => startEdit(playerId, field)}        title="Double-clic pour éditer"
+      >        {value}      </span>    );  };  const posCounts = POSITIONS.reduce((acc, p) => ({ ...acc, [p]: players.filter(pl => pl.position === p).length }), {});  const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;  return (    <div>      <p className="page-sub">        Sélectionnez une nation puis remplissez son effectif.{" "}        {loadingFilled          ? <span style={{ color: "var(--text3)" }}>Chargement...</span>          : <span style={{ color: "var(--green)" }}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>        }      </p>      <Feedback msg={fb} />      {/* ── BOUTON IMPORT OLYMPICS ── */}      <div className="card" style={{ marginBottom: 16 }}>        <div className="card-title">🌐 Import depuis olympics.com</div>        <p style={{ fontSize: ".8rem", color: "var(--text2)", marginBottom: 12, lineHeight: 1.6 }}>          Scrape automatiquement les effectifs officiels publiés sur olympics.com.          Utilise HTTP direct, puis l'IA si la page est bloquée.        </p>        <button          className="btn-action btn-blue"          onClick={importFromOlympics}          disabled={importBusy}          style={{ width: "100%" }}        >          {importBusy            ? <><span className="spinner" /> Import en cours (HTTP + IA)...</>            : "🌐 Importer depuis olympics.com"          }        </button>        {importReport && (          <div style={{            marginTop: 12,            background: importReport.status === "success" ? "rgba(0,255,170,.07)" : "rgba(255,204,68,.07)",            border: `1px solid ${importReport.status === "success" ? "rgba(0,255,170,.25)" : "rgba(255,204,68,.25)"}`,            borderRadius: 8, padding: "10px 14px",            fontSize: ".78rem", lineHeight: 1.6,          }}>            <div style={{ fontWeight: 700, marginBottom: 6 }}>              Rapport d'import — stratégie : <em>{importReport.strategy}</em>            </div>            <div>✅ {importReport.imported} nation(s) importée(s)</div>            {importReport.nations?.slice(0, 8).map(n => (              <div key={n.nation} style={{ color: "var(--text2)", paddingLeft: 8 }}>                • {n.nation} : {n.players} joueurs{n.coach ? `, coach : ${n.coach}` : ""}              </div>            ))}            {importReport.errors?.length > 0 && (              <div style={{ color: "var(--red)", marginTop: 6 }}>                ⚠️ Erreurs : {importReport.errors.slice(0, 3).join(" · ")}              </div>            )}            {!importReport.imported && (              <div style={{ color: "var(--gold)", marginTop: 6 }}>                ℹ️ {importReport.message}              </div>            )}          </div>        )}      </div>      {/* ── SÉLECTION NATION ── */}      <div className="card">        <div className="card-title">Sélection de la nation</div>        {Object.entries(NATIONS_CDM2026).map(([group, nations]) => (          <div key={group}>            <div className="group-label">{group}</div>            <div className="nation-grid">              {nations.map(n => {                const isFilled   = filledNations.has(n);                const isSelected = selectedNation === n;                return (                  <button key={n}                    className={`nation-chip ${isSelected ? "selected" : ""} ${isFilled ? "filled" : ""}`}                    onClick={() => { setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}>                    {isFilled && <span className="nation-chip-check">✅</span>}                    {n}                  </button>                );              })}            </div>          </div>        ))}      </div>      {selectedNation && (        <>          <div className="card">            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span></div>            <div className="upload-tabs">              <button className={`upload-tab ${inputMode === "text" ? "active" : ""}`} onClick={() => setInputMode("text")}>✏️ Texte</button>              <button className={`upload-tab ${inputMode === "image" ? "active" : ""}`} onClick={() => setInputMode("image")}>📷 Capture</button>            </div>            {inputMode === "text"              ? <div className="field">                  <label>Texte de l'effectif</label>                  <textarea placeholder={`Collez la liste de ${selectedNation} ici...`} value={promptText} onChange={e => setPromptText(e.target.value)} style={{ minHeight: 160 }} />                </div>              : <div className="field">                  <div className={`upload-zone ${drag ? "drag" : ""}`}                    onDragOver={e => { e.preventDefault(); setDrag(true); }}                    onDragLeave={() => setDrag(false)}                    onDrop={e => { e.preventDefault(); setDrag(false); handleImageDrop(e.dataTransfer.files[0]); }}                    onClick={() => fileRef.current?.click()}>                    <div style={{ fontSize: "2rem" }}>📷</div>                    <p>Glissez une capture ou cliquez</p>                    {imageName && <p style={{ color: "var(--green)", fontSize: ".75rem", marginTop: 6 }}>✅ {imageName}</p>}                    <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleImageDrop(e.target.files[0])} />                  </div>                  {imageData && <img src={imageData} alt="preview" style={{ maxHeight: 200, maxWidth: "100%", marginTop: 8, borderRadius: 6 }} />}                </div>            }            <div className="field row-2">              <div>                <label>Entraîneur (optionnel)</label>                <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e => setCoachName(e.target.value)} />              </div>              <div style={{ display: "flex", alignItems: "flex-end" }}>                <button className="btn-action btn-blue" style={{ width: "100%" }} onClick={parseWithGroq} disabled={busy}>                  {busy ? <><span className="spinner" /> Analyse...</> : "🤖 Parser avec Groq"}                </button>              </div>            </div>          </div>          {/* ── TABLE ÉDITABLE INLINE (double-clic) ── */}          <div className="card">            <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>              <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>              <div style={{ display: "flex", gap: 6 }}>                {POSITIONS.map(p => (                  <span key={p} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: ".68rem", color: "var(--text2)" }}>                    <span className={`pos-b ${p}`}>{p}</span>{posCounts[p]}                  </span>                ))}              </div>            </div>            <p style={{ fontSize: ".72rem", color: "var(--text3)", marginBottom: 10 }}>              💡 Double-clic sur une cellule pour l'éditer · Entrée pour valider            </p>            {players.length > 0 ? (              <table className="players-table">                <thead>                  <tr>                    <th>#</th>                    <th>Nom</th>                    <th>Poste</th>                    <th>Prix M€</th>                    <th></th>                  </tr>                </thead>                <tbody>                  {players.map((p, i) => {                    const isNew = typeof p.id === "string"; // uid() = string, BDD = number                    return (                      <tr key={p.id}>                        <td style={{ color: "var(--text3)", fontSize: ".72rem", width: 28 }}>{i + 1}</td>                        <td>                          <EditableCell playerId={p.id} field="name" value={p.name} isNew={isNew} />                        </td>                        <td>                          <EditableCell playerId={p.id} field="position" value={p.position} isNew={isNew} options={POSITIONS} />                        </td>                        <td>                          <EditableCell playerId={p.id} field="price" value={p.price} isNew={isNew} type="number" />                        </td>                        <td>                          <button className="btn-del" onClick={() => removePlayer(p.id)}>✕</button>                        </td>                      </tr>                    );                  })}                </tbody>              </table>            ) : (              <div style={{ textAlign: "center", padding: "32px", color: "var(--text3)", fontSize: ".82rem" }}>                Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.              </div>            )}            <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>            <div className="actions-strip">              <button className="btn-action btn-green" onClick={injectSquad} disabled={busy || players.length < 3}>                {busy ? <><span className="spinner" /> Injection...</> : "💾 Enregistrer en BDD"}              </button>              <button className="btn-action btn-ghost" onClick={() => { setPlayers([]); setCoachName(""); }}>Réinitialiser</button>            </div>          </div>        </>      )}    </div>  );}
 
-const RANKING_TABS = [
-  { key:"global_ranking",  label:"🌍 Global",   scoreKey:"total",   color:"var(--gold)" },
-  { key:"fantasy_ranking", label:"⚽ Fantasy",  scoreKey:"fantasy", color:"var(--green)" },
-  { key:"scores_ranking",  label:"🎯 Scores",   scoreKey:"scores",  color:"var(--blue)" },
-  { key:"bracket_ranking", label:"🗺️ Bracket",  scoreKey:"bracket", color:"var(--orange)" },
-  { key:"annexes_ranking", label:"🎖️ Annexes",  scoreKey:"annexes", color:"#a78bfa" },
-];
+// --- SECTION 3 : CALENDRIER & RÉSULTATS ---
+function MatchesSection() {
+  const [home, setHome] = useState("");
+  const [away, setAway] = useState("");
+  const [mdate, setMdate] = useState("");
+  const [mgroup, setMgroup] = useState("Groupe A");
+  const [fb, setFb] = useState(null);
+  const [busy, setBusy] = useState(false);
 
-const MEDALS = ["🥇","🥈","🥉"];
+  const showFb = (type, text) => { setFb({type, text}); setTimeout(() => setFb(null), 4000); };
 
-function GeneralLeagueSection() {
-  const [leagueData,  setLeagueData]  = useState(null);
-  const [activeTab,   setActiveTab]   = useState("global_ranking");
-  const [loading,     setLoading]     = useState(false);
-  const [busy,        setBusy]        = useState(false);
-  const [fb,          setFb]          = useState(null);
-
-  const showFb = (type, text, dur=5000) => {
-    setFb({type,text}); if(dur) setTimeout(()=>setFb(null), dur);
-  };
-
-  const loadRanking = async () => {
-    setLoading(true);
-    try {
-      const res  = await adminFetch("/leagues/general");
-      const data = await res.json();
-      if(!res.ok) throw new Error(data.detail || "Erreur");
-      setLeagueData(data);
-    } catch(e) {
-      showFb("err", "❌ " + e.message);
-    } finally { setLoading(false); }
-  };
-
-  useEffect(() => { loadRanking(); }, []);
-
-  const createLeague = async () => {
+  const handleAdd = async (e) => {
+    e.preventDefault();
+    if (!home || !away || !mdate) return;
     setBusy(true);
     try {
-      const res  = await adminFetch("/leagues/general", { method:"POST" });
+      const q = new URLSearchParams({ home, away, match_date: mdate, match_group: mgroup });
+      const res = await adminFetch(`/match/add?${q}`, { method: "POST" });
       const data = await res.json();
-      showFb(data.status==="success"?"ok":"err", data.message);
-      if(data.status==="success") await loadRanking();
-    } catch(e) {
-      showFb("err", "❌ " + e.message);
-    } finally { setBusy(false); }
+      if (res.ok && data.status === "success") {
+        showFb("ok", data.message);
+        setHome(""); setAway("");
+      } else {
+        showFb("err", data.detail || "Erreur lors de l'ajout");
+      }
+    } catch (e) {
+      showFb("err", "Erreur réseau : " + e.message);
+    } finally {
+      setBusy(false);
+    }
   };
-
-  const syncLeague = async () => {
-    setBusy(true);
-    try {
-      const res  = await adminFetch("/leagues/general/sync", { method:"POST" });
-      const data = await res.json();
-      showFb(data.status==="success"?"ok":"err", data.message);
-      if(data.status==="success") await loadRanking();
-    } catch(e) {
-      showFb("err", "❌ " + e.message);
-    } finally { setBusy(false); }
-  };
-
-  const activeConfig = RANKING_TABS.find(t => t.key === activeTab) || RANKING_TABS[0];
-  const rankingData  = leagueData?.[activeTab] || [];
 
   return (
-    <div>
-      <p className="page-sub">Créez la Ligue Générale qui regroupe tous les membres inscrits.</p>
+    <div className="card" style={{ maxWidth: "500px" }}>
+      <div className="card-title">Ajouter un match planifié</div>
       <Feedback msg={fb} />
-      <div className="actions-strip" style={{marginBottom:16}}>
-        <button className="btn-action btn-green" onClick={createLeague} disabled={busy}>
-          {busy?<><span className="spinner"/>Création...</>:"🏆 Créer / Mettre à jour la Ligue Générale"}
-        </button>
-        <button className="btn-action btn-ghost" onClick={syncLeague} disabled={busy}>
-          {busy?<><span className="spinner"/>Sync...</>:"🔄 Synchroniser les nouveaux membres"}
-        </button>
-        <button className="btn-action btn-ghost btn-sm" onClick={loadRanking} disabled={loading}>
-          {loading?"Chargement...":"🔁 Actualiser"}
-        </button>
-      </div>
-      {leagueData && leagueData.status === "success" && (
-        <div className="league-hero">
+      <form onSubmit={handleAdd}>
+        <div className="field">
+          <label>Équipe Domicile</label>
+          <select className="pos-sel" style={{ width: "100%", height: "38px" }} value={home} onChange={e => setHome(e.target.value)} required>
+            <option value="">-- Choisir --</option>
+            {ALL_NATIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Équipe Extérieur</label>
+          <select className="pos-sel" style={{ width: "100%", height: "38px" }} value={away} onChange={e => setAway(e.target.value)} required>
+            <option value="">-- Choisir --</option>
+            {ALL_NATIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div className="field row-2">
           <div>
-            <div className="league-badge">🏆 Ligue Générale Boulzazen</div>
-            <div className="league-meta">Code : <strong style={{color:"var(--blue)"}}>{leagueData.invite_code}</strong></div>
+            <label>Date et Heure</label>
+            <input className="inp" type="datetime-local" value={mdate} onChange={e => setMdate(e.target.value)} required />
           </div>
-          <div className="league-count">
-            <div className="league-count-val">{leagueData.member_count}</div>
-            <div className="league-count-lbl">membres</div>
+          <div>
+            <label>Phase / Groupe</label>
+            <select className="pos-sel" style={{ width: "100%", height: "38px" }} value={mgroup} onChange={e => setMgroup(e.target.value)}>
+              {Object.keys(NATIONS_CDM2026).map(g => <option key={g} value={g}>{g}</option>)}
+              <option value="16e de finale">16e de finale</option>
+              <option value="8e de finale">8e de finale</option>
+              <option value="Quart de finale">Quart de finale</option>
+              <option value="Demi-finale">Demi-finale</option>
+              <option value="Finale">Finale</option>
+            </select>
           </div>
         </div>
-      )}
-      {leagueData && leagueData.status === "not_found" && (
-        <div className="feedback info">ℹ️ La Ligue Générale n'existe pas encore. Cliquez sur « Créer ».</div>
-      )}
-      {loading && <div style={{textAlign:"center",padding:"40px",color:"var(--text3)"}}>Chargement...</div>}
-      {leagueData && leagueData.status === "success" && !loading && (
-        <div className="card">
-          <div className="ranking-tabs">
-            {RANKING_TABS.map(tab => (
-              <button key={tab.key} className={`ranking-tab ${activeTab===tab.key?"active":""}`}
-                onClick={()=>setActiveTab(tab.key)}>{tab.label}</button>
-            ))}
-          </div>
-          <div className="card-title">{activeConfig.label} <span>— {rankingData.length} joueurs</span></div>
-          {rankingData.length === 0 ? (
-            <div style={{textAlign:"center",padding:"32px",color:"var(--text3)"}}>Aucune donnée.</div>
-          ) : (
-            rankingData.map((entry, i) => (
-              <div key={entry.id} className="rank-row">
-                <div className="rank-num">{MEDALS[i] || <span>{i+1}</span>}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div className="rank-name">{entry.username}</div>
-                  <div className="rank-breakdown">
-                    <span style={{color:"var(--green)"}}>⚽{entry.fantasy}</span>{" · "}
-                    <span style={{color:"var(--blue)"}}>🎯{entry.scores}</span>{" · "}
-                    <span style={{color:"var(--gold)"}}>🗺️{entry.bracket}</span>{" · "}
-                    <span style={{color:"#a78bfa"}}>🎖️{entry.annexes}</span>
-                  </div>
-                </div>
-                <div className="rank-score" style={{color: i<3 ? activeConfig.color : "var(--text)"}}>
-                  {entry[activeConfig.scoreKey] ?? entry.total}
-                  <div style={{fontSize:".6rem",color:"var(--text3)",fontFamily:"inherit",fontWeight:500}}>pts</div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
+        <button className="btn-action btn-green" type="submit" style={{ width: "100%", marginTop: "10px" }} disabled={busy}>
+          {busy ? "Enregistrement..." : "➕ Ajouter le match"}
+        </button>
+      </form>
     </div>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Effectifs
-// ════════════════════════════════════════════════════════════════════════════
+// --- SECTION 4 : REGLES DU JEU ---
+function RulesSection() {
+  const [rawRules, setRawRules] = useState("");
+  const [rules, setRules] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [fb, setFb] = useState(null);
 
-function SquadsSection({ groqKey }) {
-  const [selectedNation, setSelectedNation] = useState(null);
-  const [inputMode,   setInputMode]   = useState("text");
-  const [promptText,  setPromptText]  = useState("");
-  const [imageData,   setImageData]   = useState(null);
-  const [imageName,   setImageName]   = useState("");
-  const [drag,        setDrag]        = useState(false);
-  const [players,     setPlayers]     = useState([]);
-  const [coachName,   setCoachName]   = useState("");
-  const [busy,        setBusy]        = useState(false);
-  const [fb,          setFb]          = useState(null);
-  const [filledNations, setFilledNations] = useState(new Set());
-  const [loadingFilled, setLoadingFilled] = useState(false);
-  const fileRef = useRef(null);
+  const showFb = (type, text) => { setFb({type, text}); setTimeout(() => setFb(null), 4000); };
 
-  const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
-
-  const loadFilledNations = useCallback(async () => {
-    setLoadingFilled(true);
+  const loadRules = async () => {
     try {
-      const res = await adminFetch("/squad/filled-nations");
+      const res = await adminFetch("/rules");
       const data = await res.json();
-      if (res.ok && data.status === "success") {
-        setFilledNations(new Set(data.filled_nations || []));
-      }
-    } catch (e) {
-      console.error("Erreur chargement nations complètes:", e);
-    } finally {
-      setLoadingFilled(false);
-    }
-  }, []);
-
-  useEffect(() => { loadFilledNations(); }, [loadFilledNations]);
-
-  const handleImageDrop = useCallback((file) => {
-    if(!file||!file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = e => { setImageData(e.target.result); setImageName(file.name); };
-    reader.readAsDataURL(file);
-  },[]);
-
-  const addPlayer = () => setPlayers(prev=>[...prev,{id:uid(),name:"",position:"M",price:6.5}]);
-  const updatePlayer = (id,field,val) => setPlayers(prev=>prev.map(p=>p.id===id?{...p,[field]:val}:p));
-  const removePlayer = (id) => setPlayers(prev=>prev.filter(p=>p.id!==id));
-
-  const parseWithGroq = async () => {
-    if(!selectedNation){ showFb("err","❌ Sélectionnez une nation."); return; }
-    const hasContent = inputMode==="text" ? promptText.trim().length>5 : !!imageData;
-    if(!hasContent){ showFb("err","❌ Fournissez du texte ou une capture d'écran."); return; }
-
-    setBusy(true); showFb("info","🤖 Groq analyse les données via le backend...",0);
-    try {
-      let rawText = "";
-      if(inputMode === "text") {
-        rawText = `Nation: ${selectedNation}\n\n${promptText}`;
-      } else {
-        rawText = `Nation: ${selectedNation}\n[IMAGE BASE64]\n${imageData}`;
-      }
-      const res  = await adminFetch("/squad/parse", {
-        method: "POST",
-        body: JSON.stringify({ nation: selectedNation, raw_squad_text: rawText }),
-      });
-      const data = await res.json();
-      if(!res.ok || data.status === "error") throw new Error(data.message || data.detail || "Erreur serveur");
-      const parsed = data.parsed_data;
-      if(!parsed) throw new Error("Données parsées vides");
-      if(parsed.coach_name) setCoachName(parsed.coach_name);
-      if(parsed.players && parsed.players.length > 0) {
-        setPlayers(parsed.players.map(p => ({ id:uid(), name:p.name||"", position:p.position||"M", price:p.price||6.5 })));
-        showFb("ok", data.message || `✅ ${parsed.players.length} joueurs détectés`);
-      } else {
-        showFb("err","⚠️ Aucun joueur détecté — reformulez ou améliorez la capture.");
-      }
-    } catch(e) {
-      showFb("err","❌ Erreur : " + e.message);
-    } finally { setBusy(false); }
+      if (res.ok && data.status === "success") setRules(data.rules || []);
+    } catch (e) { console.error(e); }
   };
 
-  const injectSquad = async () => {
-    if(!selectedNation||players.length<3){ showFb("err","❌ Sélectionnez une nation et entrez au moins 3 joueurs."); return; }
-    setBusy(true); showFb("info","💾 Injection en base de données...",0);
+  useEffect(() => { loadRules(); }, []);
+
+  const parseRulesText = async () => {
+    if (!rawRules.trim()) return;
+    setBusy(true);
+    showFb("info", "Analyse des règles par l'IA...");
     try {
-      const params = new URLSearchParams({nation:selectedNation});
-      if(coachName) params.append("coach_name",coachName);
-      const res  = await adminFetch(`/squad/inject?${params}`,{method:"POST"});
+      const res = await adminFetch("/rules/parse", {
+        method: "POST",
+        body: JSON.stringify({ raw_rules_text: rawRules })
+      });
       const data = await res.json();
-      if(data.status==="success") {
-        showFb("ok", data.message||"Effectif enregistré !");
-        await loadFilledNations();
+      if (res.ok && data.status === "success") {
+        setRules(data.rules.map(r => ({
+          id: uid(), rule_name: r.name, description: r.description,
+          position_affected: r.position || null, points_value: r.points || 0, is_active: true
+        })));
+        showFb("ok", `✅ ${data.rules.length} règles extraites.`);
       } else {
-        showFb("err", data.message||"Erreur serveur");
+        showFb("err", data.message || "Erreur d'analyse");
       }
-    } catch(e) { showFb("err","Erreur : "+e.message); }
+    } catch (e) { showFb("err", e.message); }
     finally { setBusy(false); }
   };
 
-  const posCounts = POSITIONS.reduce((acc,p)=>({...acc,[p]:players.filter(pl=>pl.position===p).length}),{});
-  const filledCount = ALL_NATIONS.filter(n => filledNations.has(n)).length;
-
-  return (
-    <div>
-      <p className="page-sub">
-        Sélectionnez une nation puis remplissez son effectif.{" "}
-        {loadingFilled
-          ? <span style={{color:"var(--text3)"}}>Chargement...</span>
-          : <span style={{color:"var(--green)"}}>✅ {filledCount}/{ALL_NATIONS.length} nations complètes</span>
-        }
-      </p>
-      <Feedback msg={fb} />
-      <div className="card">
-        <div className="card-title">Sélection de la nation</div>
-        {Object.entries(NATIONS_CDM2026).map(([group,nations])=>(
-          <div key={group}>
-            <div className="group-label">{group}</div>
-            <div className="nation-grid">
-              {nations.map(n => {
-                const isFilled   = filledNations.has(n);
-                const isSelected = selectedNation === n;
-                return (
-                  <button key={n} className={`nation-chip ${isSelected?"selected":""} ${isFilled?"filled":""}`}
-                    onClick={()=>{ setSelectedNation(n); setPlayers([]); setCoachName(""); setFb(null); }}>
-                    {isFilled && <span className="nation-chip-check">✅</span>}
-                    {n}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {selectedNation && (
-        <>
-          <div className="card">
-            <div className="card-title">Remplissage Groq IA — <span>{selectedNation}</span></div>
-            <div className="upload-tabs">
-              <button className={`upload-tab ${inputMode==="text"?"active":""}`} onClick={()=>setInputMode("text")}>✏️ Texte</button>
-              <button className={`upload-tab ${inputMode==="image"?"active":""}`} onClick={()=>setInputMode("image")}>📷 Capture</button>
-            </div>
-            {inputMode==="text"
-              ? <div className="field">
-                  <label>Texte de l'effectif</label>
-                  <textarea placeholder={`Collez la liste de ${selectedNation} ici...`} value={promptText} onChange={e=>setPromptText(e.target.value)} style={{minHeight:160}}/>
-                </div>
-              : <div className="field">
-                  <div className={`upload-zone ${drag?"drag":""}`}
-                    onDragOver={e=>{e.preventDefault();setDrag(true);}}
-                    onDragLeave={()=>setDrag(false)}
-                    onDrop={e=>{e.preventDefault();setDrag(false);handleImageDrop(e.dataTransfer.files[0]);}}
-                    onClick={()=>fileRef.current?.click()}>
-                    <div style={{fontSize:"2rem"}}>📷</div>
-                    <p>Glissez une capture ou cliquez</p>
-                    {imageName&&<p style={{color:"var(--green)",fontSize:".75rem",marginTop:6}}>✅ {imageName}</p>}
-                    <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleImageDrop(e.target.files[0])}/>
-                  </div>
-                  {imageData&&<img src={imageData} alt="preview" style={{maxHeight:200,maxWidth:"100%",marginTop:8,borderRadius:6}}/>}
-                </div>
-            }
-            <div className="field row-2">
-              <div>
-                <label>Entraîneur (optionnel)</label>
-                <input className="inp" placeholder="Prénom Nom" value={coachName} onChange={e=>setCoachName(e.target.value)}/>
-              </div>
-              <div style={{display:"flex",alignItems:"flex-end"}}>
-                <button className="btn-action btn-blue" style={{width:"100%"}} onClick={parseWithGroq} disabled={busy}>
-                  {busy?<><span className="spinner"/> Analyse...</>:"🤖 Parser avec Groq (backend)"}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-title" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span>Effectif — {selectedNation} <span>({players.length} joueurs)</span></span>
-              <div style={{display:"flex",gap:6}}>
-                {POSITIONS.map(p=>(
-                  <span key={p} style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:".68rem",color:"var(--text2)"}}>
-                    <span className={`pos-b ${p}`}>{p}</span>{posCounts[p]}
-                  </span>
-                ))}
-              </div>
-            </div>
-            {players.length>0 ? (
-              <table className="players-table">
-                <thead><tr><th>#</th><th>Nom</th><th>Poste</th><th>Prix M€</th><th></th></tr></thead>
-                <tbody>
-                  {players.map((p,i)=>(
-                    <tr key={p.id}>
-                      <td style={{color:"var(--text3)",fontSize:".72rem",width:28}}>{i+1}</td>
-                      <td><input className="name-inp" value={p.name} onChange={e=>updatePlayer(p.id,"name",e.target.value)}/></td>
-                      <td>
-                        <select className="pos-sel" value={p.position} onChange={e=>updatePlayer(p.id,"position",e.target.value)}>
-                          {POSITIONS.map(pos=><option key={pos}>{pos}</option>)}
-                        </select>
-                      </td>
-                      <td>
-                        <input className="price-inp" type="number" step=".5" min="4" max="15"
-                          value={p.price} onChange={e=>updatePlayer(p.id,"price",parseFloat(e.target.value)||6.5)}/>
-                      </td>
-                      <td><button className="btn-del" onClick={()=>removePlayer(p.id)}>✕</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div style={{textAlign:"center",padding:"32px",color:"var(--text3)",fontSize:".82rem"}}>
-                Aucun joueur — utilisez le parsing Groq ou ajoutez manuellement.
-              </div>
-            )}
-            <button className="btn-add-row" onClick={addPlayer}>+ Ajouter un joueur</button>
-            <div className="actions-strip">
-              <button className="btn-action btn-green" onClick={injectSquad} disabled={busy||players.length<3}>
-                {busy?<><span className="spinner"/> Injection...</>:"💾 Enregistrer en BDD"}
-              </button>
-              <button className="btn-action btn-ghost" onClick={()=>{setPlayers([]);setCoachName("");}}>Réinitialiser</button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Tournoi
-// ════════════════════════════════════════════════════════════════════════════
-
-function TournamentSection() {
-  const [knockout, setKnockout] = useState(
-    Object.fromEntries(KNOCKOUT_DEFS.map(r=>[r.key,Array.from({length:r.count},()=>({home:"",away:"",winner:""}))]))
-  );
-  const [busy, setBusy] = useState(false);
-  const [fb,   setFb]   = useState(null);
-
-  const showFb = (type,text,dur=5000)=>{setFb({type,text});if(dur)setTimeout(()=>setFb(null),dur);};
-
-  const updateKO = (round,idx,field,val) => {
-    setKnockout(prev=>({...prev,[round]:prev[round].map((m,i)=>i===idx?{...m,[field]:val}:m)}));
-  };
-
-  const save = async()=>{
-    setBusy(true); showFb("info","💾 Sauvegarde...",0);
-    try{
-      const res  = await adminFetch("/tournament/parse",{method:"POST",body:JSON.stringify({raw_tournament_text:JSON.stringify({knockout})})});
-      const data = await res.json();
-      showFb(data.status==="success"?"ok":"err",data.message||"Sauvegardé");
-    }catch(e){showFb("err","Erreur : "+e.message);}
-    finally{setBusy(false);}
-  };
-
-  return (
-    <div>
-      <p className="page-sub">Gérez le tableau d'élimination directe de la CDM 2026.</p>
-      <Feedback msg={fb} />
-      {KNOCKOUT_DEFS.map(({key,label})=>(
-        <div key={key} className="ko-card">
-          <div className="ko-header">{label}</div>
-          {knockout[key]?.map((m,i)=>(
-            <div key={i} className="ko-match">
-              <input className="ko-team-inp" placeholder="Équipe 1" value={m.home} onChange={e=>updateKO(key,i,"home",e.target.value)}/>
-              <span className="ko-vs">vs</span>
-              <input className="ko-team-inp" placeholder="Équipe 2" value={m.away} onChange={e=>updateKO(key,i,"away",e.target.value)}/>
-              <input className="ko-winner-inp" placeholder="✅ Qualifié" value={m.winner} onChange={e=>updateKO(key,i,"winner",e.target.value)}/>
-            </div>
-          ))}
-        </div>
-      ))}
-      <div className="actions-strip">
-        <button className="btn-action btn-green" onClick={save} disabled={busy}>
-          {busy?<><span className="spinner"/>Sauvegarde...</>:"💾 Enregistrer le tournoi"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Règles
-//  ✅ Fix : saveRules envoie TOUTES les règles (une par une) au backend
-//           au lieu d'une seule règle hardcodée
-// ════════════════════════════════════════════════════════════════════════════
-
-function RulesSection() {
-  const [activeMode, setActiveMode] = useState("fantasy");
-  const [rules, setRules]   = useState(JSON.parse(JSON.stringify(DEFAULT_RULES)));
-  const [fb,    setFb]      = useState(null);
-  const [busy,  setBusy]    = useState(false);
-
-  const showFb = (type,text,dur=4000)=>{setFb({type,text});if(dur)setTimeout(()=>setFb(null),dur);};
-  const updateFantasyRule = (id,field,val)=>setRules(prev=>({...prev,fantasy:prev.fantasy.map(r=>r.id===id?{...r,[field]:val}:r)}));
-  const updateSimpleRule  = (mode,id,field,val)=>setRules(prev=>({...prev,[mode]:prev[mode].map(r=>r.id===id?{...r,[field]:val}:r)}));
-
-  const addRule = ()=>{
-    const n = activeMode==="fantasy"
-      ? {id:`f${uid()}`,label:"Nouvelle règle",G:0,D:0,M:0,A:0}
-      : {id:`${activeMode[0]}${uid()}`,label:"Nouvelle règle",pts:0,...(activeMode==="coach"?{note:""}:{})};
-    setRules(prev=>({...prev,[activeMode]:[...prev[activeMode],n]}));
-  };
-
-  const deleteRule = (id)=>setRules(prev=>({...prev,[activeMode]:prev[activeMode].filter(r=>r.id!==id)}));
-
-  /**
-   * ✅ Fix saveRules :
-   * Ancienne version : envoyait une seule règle hardcodée avec des valeurs vides.
-   * Nouvelle version : sauvegarde en localStorage + envoie CHAQUE règle au backend
-   * via POST /api/admin/rules/update avec les vraies valeurs.
-   */
   const saveRules = async () => {
+    if (rules.length === 0) return;
     setBusy(true);
-    setFb(null);
-
-    // 1. Toujours sauvegarder en localStorage pour persistance locale immédiate
-    localStorage.setItem("admin_custom_rules", JSON.stringify(rules));
-
-    // 2. Construire la liste complète des règles à envoyer au backend
-    const allRules = [];
-
-    // Règles Fantasy (par poste)
-    rules.fantasy.forEach(r => {
-      POSITIONS.forEach(pos => {
-        allRules.push({
-          rule_name:         `fantasy_${r.id}_${pos}`,
-          description:       `${r.label} (${pos})`,
-          position_affected: pos,
-          points_value:      Number(r[pos]) || 0,
-          is_active:         true,
-        });
-      });
-    });
-
-    // Règles Coach
-    rules.coach.forEach(r => {
-      allRules.push({
-        rule_name:         `coach_${r.id}`,
-        description:       r.note ? `${r.label} — ${r.note}` : r.label,
-        position_affected: "COACH",
-        points_value:      Number(r.pts) || 0,
-        is_active:         true,
-      });
-    });
-
-    // Règles Pronos, Bracket, Annexes
-    ["pronos", "bracket", "annexes"].forEach(mode => {
-      rules[mode].forEach(r => {
-        allRules.push({
-          rule_name:         `${mode}_${r.id}`,
-          description:       r.label,
-          position_affected: mode.toUpperCase(),
-          points_value:      Number(r.pts) || 0,
-          is_active:         true,
-        });
-      });
-    });
-
-    // 3. Envoyer les règles au backend (une par une, en série)
-    let successCount = 0;
-    let errorCount   = 0;
-
-    for (const rule of allRules) {
-      try {
+    showFb("info", "Sauvegarde de toutes les règles...");
+    try {
+      let successCount = 0;
+      for (const r of rules) {
         const res = await adminFetch("/rules/update", {
           method: "POST",
-          body:   JSON.stringify(rule),
+          body: JSON.stringify({
+            rule_name: r.rule_name || r.name,
+            description: r.description,
+            position_affected: r.position_affected || r.position || null,
+            points_value: parseInt(r.points_value || r.points) || 0,
+            is_active: r.is_active !== false
+          })
         });
-        if (res.ok) {
-          successCount++;
-        } else {
-          errorCount++;
-        }
-      } catch {
-        errorCount++;
+        if (res.ok) successCount++;
       }
-    }
-
-    if (errorCount === 0) {
-      showFb("ok", `✅ ${successCount} règles sauvegardées en base de données.`);
-    } else if (successCount > 0) {
-      showFb("warn", `⚠️ ${successCount} règles sauvegardées, ${errorCount} erreurs. Vérifiez le backend.`);
-    } else {
-      // Backend inaccessible mais localStorage est à jour
-      showFb("warn", "⚠️ Règles sauvegardées localement. Le backend est inaccessible — elles seront synchronisées au prochain démarrage.");
-    }
-
-    setBusy(false);
+      showFb("ok", `✅ ${successCount}/${rules.length} règles enregistrées avec succès en BDD.`);
+      loadRules();
+    } catch (e) { showFb("err", e.message); }
+    finally { setBusy(false); }
   };
 
   return (
     <div>
-      <p className="page-sub">Modifiez les barèmes par mode de jeu.</p>
-      <Feedback msg={fb}/>
-      <div className="mode-tab-bar">
-        {Object.entries(MODE_LABELS).map(([key,label])=>(
-          <button key={key} className={`mode-tab ${activeMode===key?"active":""}`} onClick={()=>setActiveMode(key)}>{label}</button>
-        ))}
-      </div>
       <div className="card">
-        <div className="card-title" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span>{MODE_LABELS[activeMode]}</span>
-          <div style={{display:"flex",gap:6}}>
-            <button className="btn-action btn-ghost btn-sm" onClick={()=>{setRules(JSON.parse(JSON.stringify(DEFAULT_RULES)));showFb("info","Réinitialisé.");}}>Réinitialiser</button>
-            <button className="btn-save-rules" onClick={saveRules} disabled={busy}>{busy?<><span className="spinner"/>Sauvegarde...</>:"💾 Sauvegarder"}</button>
-          </div>
+        <div className="card-title">Parser le barème de points via IA</div>
+        <div className="field">
+          <textarea placeholder="Collez le texte brut contenant vos règles de points (ex: Un but de gardien rapporte 10pts, un clean sheet 4pts...)"
+            value={rawRules} onChange={e=>setRawRules(e.target.value)} style={{ minHeight: "100px" }} />
         </div>
-        {activeMode==="fantasy"&&(
-          <table className="rules-table">
-            <thead><tr><th style={{width:"40%"}}>Action</th><th className="pts-cell">G</th><th className="pts-cell">D</th><th className="pts-cell">M</th><th className="pts-cell">A</th><th></th></tr></thead>
-            <tbody>
-              {rules.fantasy.map(r=>(
-                <tr key={r.id}>
-                  <td><input className="rule-inp" value={r.label} onChange={e=>updateFantasyRule(r.id,"label",e.target.value)}/></td>
-                  {POSITIONS.map(pos=>(
-                    <td key={pos} className="pts-cell">
-                      <input className="pts-inp" type="number" step="1" value={r[pos]} onChange={e=>updateFantasyRule(r.id,pos,parseInt(e.target.value)||0)} style={{color:r[pos]>0?"var(--green)":r[pos]<0?"var(--red)":"var(--text)"}}/>
-                    </td>
-                  ))}
-                  <td><button className="btn-del" onClick={()=>deleteRule(r.id)}>✕</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {activeMode==="coach"&&(
-          <table className="rules-table">
-            <thead><tr><th>Action</th><th className="pts-cell">Points</th><th>Note</th><th></th></tr></thead>
-            <tbody>
-              {rules.coach.map(r=>(
-                <tr key={r.id}>
-                  <td><input className="rule-inp" value={r.label} onChange={e=>updateSimpleRule("coach",r.id,"label",e.target.value)}/></td>
-                  <td className="pts-cell"><input className="pts-inp" type="number" value={r.pts} onChange={e=>updateSimpleRule("coach",r.id,"pts",parseInt(e.target.value)||0)} style={{color:r.pts>0?"var(--green)":r.pts<0?"var(--red)":"var(--text)"}}/></td>
-                  <td><input className="rule-inp" value={r.note||""} placeholder="Note..." onChange={e=>updateSimpleRule("coach",r.id,"note",e.target.value)}/></td>
-                  <td><button className="btn-del" onClick={()=>deleteRule(r.id)}>✕</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {["pronos","bracket","annexes"].includes(activeMode)&&(
-          <table className="rules-table">
-            <thead><tr><th>Condition</th><th className="pts-cell">Points</th><th></th></tr></thead>
-            <tbody>
-              {rules[activeMode].map(r=>(
-                <tr key={r.id}>
-                  <td><input className="rule-inp" value={r.label} onChange={e=>updateSimpleRule(activeMode,r.id,"label",e.target.value)}/></td>
-                  <td className="pts-cell"><input className="pts-inp" type="number" value={r.pts} onChange={e=>updateSimpleRule(activeMode,r.id,"pts",parseInt(e.target.value)||0)} style={{color:r.pts>0?"var(--green)":r.pts<0?"var(--red)":"var(--text)"}}/></td>
-                  <td><button className="btn-del" onClick={()=>deleteRule(r.id)}>✕</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        <button className="btn-add-row" onClick={addRule}>+ Ajouter une règle</button>
+        <button className="btn-action btn-blue" onClick={parseRulesText} disabled={busy}>🤖 Extraire le barème structuré</button>
       </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  SECTION : Outils
-//  ✅ Fix : vérifie groq_configure depuis /api/scraping/status (backend)
-//           au lieu de la clé localStorage — la clé réelle est dans .env
-// ════════════════════════════════════════════════════════════════════════════
-
-function ToolsSection() {
-  const [busy,          setBusy]          = useState(false);
-  const [fb,            setFb]            = useState(null);
-  const [groqBackend,   setGroqBackend]   = useState(null); // null = non chargé
-  const [loadingStatus, setLoadingStatus] = useState(true);
-
-  const showFb = (type,text,dur=5000) => { setFb({type,text}); if(dur) setTimeout(()=>setFb(null),dur); };
-
-  /**
-   * ✅ Fix : Au lieu de vérifier !groqKey (localStorage), on appelle
-   * GET /api/scraping/status qui retourne { groq_configure: bool }
-   * C'est la vraie source de vérité — Groq est configuré via .env côté backend.
-   */
-  const loadBackendStatus = async () => {
-    setLoadingStatus(true);
-    try {
-      const res  = await fetch(`${API_BASE}/api/scraping/status`);
-      const data = await res.json();
-      setGroqBackend(data.groq_configure === true);
-    } catch {
-      setGroqBackend(false);
-    } finally {
-      setLoadingStatus(false);
-    }
-  };
-
-  useEffect(() => { loadBackendStatus(); }, []);
-
-  const forceScraping = async () => {
-    setBusy(true); showFb("info","🔄 Scraping lancé...",0);
-    try{
-      const res  = await fetch(`${API_BASE}/api/admin/force-scraping`,{
-        method: "POST",
-        headers: { Authorization: `Bearer ${getAdminToken()}` },
-      });
-      const d = await res.json();
-      showFb(res.ok?"ok":"err", d.message||"Terminé");
-    } catch(e) {
-      showFb("err","Erreur : "+e.message);
-    } finally { setBusy(false); }
-  };
-
-  const groqReady = groqBackend === true;
-
-  return (
-    <div>
-      <p className="page-sub">Outils de maintenance et statut du système.</p>
-      <Feedback msg={fb}/>
-
-      {/* Statut Groq backend */}
+      <Feedback msg={fb} />
       <div className="card">
-        <div className="card-title">Statut Groq (backend)</div>
-        {loadingStatus ? (
-          <div style={{color:"var(--text3)",fontSize:".82rem"}}>Vérification du statut backend...</div>
-        ) : (
-          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-            <span className={`groq-badge ${groqReady?"on":"off"}`}>
-              <span className={`groq-dot ${groqReady?"pulse":""}`}/>
-              Groq {groqReady?"Configuré (backend .env)":"Non configuré"}
-            </span>
-            <button className="btn-action btn-ghost btn-sm" onClick={loadBackendStatus}>
-              🔁 Vérifier
-            </button>
-          </div>
-        )}
-        {!groqReady && !loadingStatus && (
-          <div style={{
-            background:"rgba(255,204,68,.07)",
-            border:"1px solid rgba(255,204,68,.25)",
-            borderRadius:6, padding:"8px 12px",
-            fontSize:".78rem", color:"var(--gold)", lineHeight:1.5,
-          }}>
-            ⚠️ La clé Groq n'est pas configurée côté backend. Ajoutez <code>GROQ_API_KEY=gsk_…</code> dans <code>backend/.env</code> puis redémarrez le serveur.
-            La clé stockée dans les paramètres admin (localStorage) n'est pas utilisée par le scraper.
-          </div>
-        )}
-        <p style={{fontSize:".82rem",color:"var(--text2)",margin:"14px 0 10px",lineHeight:1.6}}>
-          Force le scraping Groq et recalcule les points de tous les utilisateurs.
-        </p>
-        <button className="btn-action btn-blue" onClick={forceScraping} disabled={busy||!groqReady}>
-          {busy?<><span className="spinner"/> Scraping...</>:"🔄 Forcer le scraping"}
-        </button>
-      </div>
-
-      <div className="card">
-        <div className="card-title">Liens système</div>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {[
-            {label:"Health",   url:"/api/health"},
-            {label:"Scraping", url:"/api/scraping/status"},
-            {label:"Swagger",  url:"/docs"},
-          ].map(({label,url})=>(
-            <a key={url} href={`${API_BASE}${url}`} target="_blank" rel="noopener"
-              className="btn-action btn-ghost btn-sm" style={{textDecoration:"none"}}>
-              🔗 {label}
-            </a>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  NAVIGATION
-// ════════════════════════════════════════════════════════════════════════════
-
-const TABS = [
-  { id:"settings",       icon:"⚙️",  label:"Paramètres"    },
-  { id:"users",          icon:"👥",  label:"Utilisateurs"  },
-  { id:"general_league", icon:"🏆",  label:"Ligue Générale"},
-  { id:"squads",         icon:"🌍",  label:"Effectifs"     },
-  { id:"tournament",     icon:"🗺️",  label:"Tournoi"       },
-  { id:"rules",          icon:"📋",  label:"Règles"        },
-  { id:"tools",          icon:"🛠️",  label:"Outils"        },
-];
-
-// ════════════════════════════════════════════════════════════════════════════
-//  DASHBOARD
-// ════════════════════════════════════════════════════════════════════════════
-
-function AdminDashboard({ onLogout }) {
-  const [activeTab, setActiveTab] = useState("settings");
-  const [groqKey,   setGroqKey]   = useState(()=>getStoredGroqKey());
-
-  return (
-    <div className="admin-layout">
-      <aside className="sidebar">
-        <div className="sidebar-logo">Fantasy<span>⚡</span>Admin</div>
-        {TABS.map(t=>(
-          <button key={t.id} className={`nav-item ${activeTab===t.id?"active":""}`} onClick={()=>setActiveTab(t.id)}>
-            <span className="icon">{t.icon}</span>{t.label}
+        <div className="card-title">Barème Actif en Base de Données ({rules.length})</div>
+        <table className="players-table">
+          <thead>
+            <tr>
+              <th>Nom de l'action</th>
+              <th>Description</th>
+              <th>Poste ciblé</th>
+              <th>Valeur Points</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((r, i) => (
+              <tr key={r.id || i}>
+                <td><strong>{r.rule_name || r.name}</strong></td>
+                <td>{r.description}</td>
+                <td><span className={`pos-b ${r.position_affected || "TOUS"}`}>{r.position_affected || "TOUS"}</span></td>
+                <td style={{ color: "var(--green)", fontWeight: "bold" }}>{r.points_value || r.points} pts</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rules.length > 0 && (
+          <button className="btn-action btn-green" onClick={saveRules} style={{ width: "100%", marginTop: "15px" }} disabled={busy}>
+            💾 Confirmer & Appliquer toutes les règles en BDD
           </button>
-        ))}
-        <div className="sidebar-bottom">
-          <button className="btn-logout" onClick={onLogout}>🚪 Déconnexion</button>
-        </div>
-      </aside>
-
-      <main className="main-content">
-        <div className="page-title">{TABS.find(t=>t.id===activeTab)?.icon} {TABS.find(t=>t.id===activeTab)?.label}</div>
-        {activeTab==="settings"       && <SettingsSection groqKey={groqKey} onGroqKeyChange={setGroqKey}/>}
-        {activeTab==="users"          && <UsersSection/>}
-        {activeTab==="general_league" && <GeneralLeagueSection/>}
-        {activeTab==="squads"         && <SquadsSection groqKey={groqKey}/>}
-        {activeTab==="tournament"     && <TournamentSection/>}
-        {activeTab==="rules"          && <RulesSection/>}
-        {activeTab==="tools"          && <ToolsSection/>}
-      </main>
+        )}
+      </div>
     </div>
   );
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  LOGIN
-// ════════════════════════════════════════════════════════════════════════════
+// --- SECTION 5 : OUTILS & LOGS ---
+function ToolsSection() {
+  const [status, setStatus] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(false);
 
-function AdminLogin({ onSuccess }) {
-  const [user,setUser]=useState("");
-  const [pass,setPass]=useState("");
-  const [err,setErr]=useState("");
-  const [busy,setBusy]=useState(false);
+  useEffect(() => {
+    // Vérification dynamique de la configuration Groq côté backend
+    fetch(`${API_BASE}/api/scraping/status`)
+      .then(res => res.json())
+      .then(data => setStatus(data))
+      .catch(e => console.error(e));
 
-  const submit = async(e)=>{
-    e.preventDefault(); setErr(""); setBusy(true);
-    try{
-      const res  = await fetch(`${API_BASE}/api/admin/login`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({username:user.trim(),password:pass}),
-        signal:AbortSignal.timeout(API_TIMEOUT),
+    // Chargement des logs d'administration
+    setLoading(true);
+    adminFetch("/logs?limit=30")
+      .then(res => res.json())
+      .then(data => { if(data.status==="success") setLogs(data.logs || []); })
+      .catch(e => console.error(e))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div>
+      <div className="card row-2" style={{ gap: "20px" }}>
+        <div>
+          <div className="card-title">Statut Serveur & IA</div>
+          <p style={{ fontSize: ".85rem", marginBottom: "6px" }}>
+            Moteur de scraping : {status?.scraper_status === "functional" ? <span style={{color:"var(--green)"}}>🟢 Opérationnel</span> : <span>⚪ Inconnu</span>}
+          </p>
+          <p style={{ fontSize: ".85rem" }}>
+            Configuration Groq (Backend) : {status?.groq_configured ? <span style={{color:"var(--green)"}}>🔒 Configurée (.env)</span> : <span style={{color:"var(--red)"}}>❌ Manquante</span>}
+          </p>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-title">Logs d'activité Admin (30 derniers)</div>
+        {loading ? <p>Chargement des audits...</p> : (
+          <div style={{ maxHeight: "350px", overflowY: "auto", fontSize: ".8rem", fontFamily: "monospace", background: "var(--bg)", padding: "10px", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            {logs.map(l => (
+              <div key={l.id} style={{ marginBottom: "6px", borderBottom: "1px dashed var(--border2)", paddingBottom: "4px" }}>
+                <span style={{ color: "var(--text3)" }}>[{l.timestamp?.substring(11,19)}]</span>{" "}
+                <span style={{ color: "var(--gold)", fontWeight: "bold" }}>{l.action.toUpperCase()}</span>{" "}
+                <span style={{ color: "var(--text2)" }}>({l.target})</span> — {l.details}
+              </div>
+            ))}
+            {logs.length === 0 && <p style={{ color: "var(--text3)" }}>Aucune action logguée.</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- SOUS-COMPOSANT LOGIN FORM ---
+function AdminLogin({ onLoginSuccess }) {
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr("");
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: user, password: pass })
       });
-      const d = await res.json().catch(()=>({}));
-      if(res.ok && d.access_token){
-        setAdminToken(d.access_token);
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        setAdminToken(data.access_token);
+        onLoginSuccess(data.access_token);
         window.dispatchEvent(new Event("storage"));
-        onSuccess(d.access_token);
       } else {
-        setErr(d.detail||d.message||"Identifiants incorrects.");
+        setErr(data.detail || "Identifiants invalides");
       }
-    }catch(e){
-      setErr(e.name==="TimeoutError"?"Timeout — backend inaccessible.":"Erreur : "+e.message);
-    }finally{setBusy(false);}
+    } catch (e) {
+      setErr("Erreur réseau de communication avec l'API admin");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -1332,7 +490,7 @@ function AdminLogin({ onSuccess }) {
         <div><label>Mot de passe</label><input className="inp" type="password" placeholder="••••••" value={pass} onChange={e=>setPass(e.target.value)} required/></div>
         {err&&<p className="err-msg">⚠ {err}</p>}
         <button className="btn-primary" type="submit" disabled={busy}>
-          {busy?<><span className="spinner" style={{borderTopColor:"#fff"}}/> Connexion...</>:"Se connecter"}
+          {busy?<><span className="spinner" style={{borderTopColor:\"#fff\"}}/> Connexion...</>:\"Se connecter\"}
         </button>
         <p className="hint">admin / admin00</p>
       </form>
@@ -1341,26 +499,59 @@ function AdminLogin({ onSuccess }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  EXPORT
+//  EXPORT COMPOSANT PRINCIPAL
 // ════════════════════════════════════════════════════════════════════════════
 
 export default function AdminPanel() {
   const [token, setToken] = useState(()=>getAdminToken());
+  const [tab, setTab] = useState("squads");
 
   const handleLogout = ()=>{
     setAdminToken(null); setToken("");
     window.dispatchEvent(new Event("storage"));
   };
 
+  if (!token) {
+    return <AdminLogin onLoginSuccess={t => setToken(t)} />;
+  }
+
   return (
-    <>
-      <style>{css}</style>
-      <div className="admin-root">
-        {!token
-          ? <AdminLogin onSuccess={t=>setToken(t)}/>
-          : <AdminDashboard onLogout={handleLogout}/>
-        }
-      </div>
-    </>
+    <div className="admin-layout">
+      {/* Sidebar de navigation gauche */}
+      <aside className="admin-aside">
+        <div className="admin-brand">Boulzazen <span>⚡</span> Admin</div>
+        <nav className="admin-nav">
+          <button className={`nav-item ${tab==="squads"?"active":""}`} onClick={()=>setTab("squads")}>🏃‍♂️ Effectifs & Scraping</button>
+          <button className={`nav-item ${tab==="users"?"active":""}`} onClick={()=>setTab("users")}>👥 Gestion Utilisateurs</button>
+          <button className={`nav-item ${tab==="matches"?"active":""}`} onClick={()=>setTab("matches")}>📅 Calendrier Matches</button>
+          <button className={`nav-item ${tab==="rules"?"active":""}`} onClick={()=>setTab("rules")}>📜 Barème de Points</button>
+          <button className={`nav-item ${tab==="tools"?"active":""}`} onClick={()=>setTab("tools")}>⚙️ Serveur & Audits</button>
+        </nav>
+        <div style={{ padding: "0 15px", marginTop: "auto" }}>
+          <button className="btn-logout" onClick={handleLogout}>🚪 Déconnexion</button>
+        </div>
+      </aside>
+
+      {/* Conteneur principal de la vue active */}
+      <main className="admin-main">
+        <header className="admin-header">
+          <h1>
+            {tab === "squads" && "🏃‍♂️ Gestion des Effectifs & Scrapers"}
+            {tab === "users" && "👥 Comptes Utilisateurs & Synchro"}
+            {tab === "matches" && "📅 Planification du Calendrier"}
+            {tab === "rules" && "📜 Barème de Points & Règles IA"}
+            {tab === "tools" && "⚙️ Outils Système & Logs d'Audit"}
+          </h1>
+        </header>
+
+        <section className="admin-body">
+          {tab === "squads" && <SquadsSection />}
+          {tab === "users" && <UsersSection />}
+          {tab === "matches" && <MatchesSection />}
+          {tab === "rules" && <RulesSection />}
+          {tab === "tools" && <ToolsSection />}
+        </section>
+      </main>
+    </div>
   );
 }

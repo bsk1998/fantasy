@@ -26,4 +26,4 @@ PATCH /api/admin/points/{player_id}  # override manuel admin
 
 
 voilà où on sait arreter :
-etape 1-1;  le fichier scraper 
+etape 1-1; j'ai cree  le fichier scraper 
